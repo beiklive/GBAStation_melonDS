@@ -17,6 +17,7 @@
 DS emulator, sorta
 
 The goal is to do things right and fast, akin to blargSNES (but hopefully better). But also to, you know, have a fun challenge :)
+### [THIS IS NOT AN ACTIVELY DEVELOPED FORK, AND I DID NO CHANGES TO THE CODE. THIS REPOSITORY WILL EXIST UNTIL GHEOVGOS UPLOADS A COMPILED VERSION OF MELONDS]
 <hr>
 
 ## How to use
