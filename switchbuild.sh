@@ -7,7 +7,7 @@
 #   - CMake and make available in the MSYS2 environment
 #
 # Usage:
-#   ./switchbuild.sh [-j JOBS] [--build-dir DIR] [--clean] [--opengl]
+#   ./switchbuild.sh [-j JOBS] [--build-dir DIR] [--clean]
 
 set -Eeuo pipefail
 
@@ -23,14 +23,13 @@ esac
 
 usage() {
     cat <<EOF
-Usage: $0 [-j JOBS] [--build-dir DIR] [--clean] [--opengl]
+Usage: $0 [-j JOBS] [--build-dir DIR] [--clean]
 
 Build melonDS.nro using the Switch toolchain from an MSYS2 shell.
 
   -j, --jobs N       Number of parallel compile jobs (default: nproc, or 4).
       --build-dir D  CMake build directory (default: build_switch).
       --clean         Clean an existing CMake build before compiling.
-      --opengl        Build the experimental OpenGL + NanoVG frontend.
   -h, --help         Show this help.
 
 DEVKITPRO and DEVKITA64 may be set in the environment. DEVKITPRO defaults to
@@ -40,7 +39,6 @@ EOF
 
 JOBS=""
 CLEAN=0
-OPENGL=0
 while (( $# > 0 )); do
     case "$1" in
         -j|--jobs)
@@ -62,8 +60,8 @@ while (( $# > 0 )); do
             shift
             ;;
         --opengl)
-            OPENGL=1
-            shift
+            echo "ERROR: Switch OpenGL frontend is temporarily disabled." >&2
+            exit 2
             ;;
         -h|--help)
             usage
@@ -130,16 +128,8 @@ else
 fi
 
 echo "Configuring Switch build ..."
-if (( OPENGL )); then
-    BUILD_TARGET="melonDS_gl.nro"
-    OPENGL_ARGS=(-DBUILD_SWITCH_GL=ON -DBUILD_SWITCH=OFF -DENABLE_OGLRENDERER=ON -DENABLE_DEKOGPU=OFF)
-    if [[ -n "${BEIKLIVE_STATION_DIR:-}" ]]; then
-        OPENGL_ARGS+=("-DBEIKLIVE_STATION_DIR=${BEIKLIVE_STATION_DIR}")
-    fi
-else
-    BUILD_TARGET="melonDS.nro"
-    OPENGL_ARGS=(-DBUILD_SWITCH_GL=OFF -DBUILD_SWITCH=ON -DENABLE_OGLRENDERER=OFF -DENABLE_DEKOGPU=ON)
-fi
+BUILD_TARGET="melonDS.nro"
+OPENGL_ARGS=(-DBUILD_SWITCH_GL=OFF -DBUILD_SWITCH=ON -DENABLE_OGLRENDERER=OFF -DENABLE_DEKOGPU=ON)
 cmake -S "${ROOT_DIR}" -B "${BUILD_DIR}" \
     -DCMAKE_TOOLCHAIN_FILE="${TOOLCHAIN_FILE}" \
     -DCMAKE_BUILD_TYPE="${BUILD_TYPE}" \

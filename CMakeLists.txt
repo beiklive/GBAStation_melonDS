@@ -77,6 +77,16 @@ endif()
 
 option(ENABLE_OGLRENDERER "Enable OpenGL renderer" ON)
 
+# The Switch migration currently uses the Deko3D path.  Keep the desktop
+# OpenGL option available, but do not pull desktop epoxy/OpenGL dependencies
+# into Switch builds until the dedicated GL frontend is restored.
+if (SWITCH)
+	if (ENABLE_OGLRENDERER)
+		message(STATUS "Switch build: disabling OpenGL renderer temporarily")
+	endif()
+	set(ENABLE_OGLRENDERER OFF CACHE BOOL "Enable OpenGL renderer" FORCE)
+endif()
+
 if (ENABLE_OGLRENDERER)
     add_definitions(-DOGLRENDERER_ENABLED)
 endif()
@@ -157,7 +167,7 @@ if (BUILD_QT_SDL)
 endif()
 
 if (BUILD_SWITCH_GL)
-	add_subdirectory(src/frontend/switch_gl)
+	message(FATAL_ERROR "BUILD_SWITCH_GL is temporarily disabled; use the Deko3D Switch frontend")
 elseif (BUILD_SWITCH)
     add_subdirectory(src/frontend/switch)
 endif()
