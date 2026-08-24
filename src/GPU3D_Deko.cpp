@@ -6,6 +6,9 @@
 #include "frontend/switch/Gfx.h"
 
 #include <assert.h>
+#include <algorithm>
+#include <cstdarg>
+#include <stdio.h>
 #include <switch.h>
 
 #define XXH_STATIC_LINKING_ONLY
@@ -23,80 +26,233 @@ u32 stupidTextureNum = 0;
 namespace GPU3D
 {
 
+extern "C" void GBAStationNDSStubLogLine(const char* line) __attribute__((weak));
+
+namespace
+{
+
+void DekoLog(const char* format, ...)
+{
+    char line[512] = {};
+    va_list args;
+    va_start(args, format);
+    vsnprintf(line, sizeof(line), format, args);
+    va_end(args);
+
+    if (GBAStationNDSStubLogLine)
+        GBAStationNDSStubLogLine(line);
+    else
+        printf("%s\n", line);
+}
+
+}
+
 DekoRenderer::DekoRenderer()
     : Renderer3D(false),
     CmdMem(*Gfx::DataHeap, 1024*128)
-{}
+{
+    DekoLog("GBAStationNDSStub: GPU3D_Deko ctor scale-capable max=%d", MaxScaleFactor);
+}
 
 DekoRenderer::~DekoRenderer()
 {}
 
-bool DekoRenderer::Init()
+void DekoRenderer::LoadShaders(int scale)
 {
-    for (int i = 0; i < 2; i++)
+    static const char* zBufferNames[] = {
+        "InterpXSpansZBuffer", "BinCombined", "DepthBlendZBuffer",
+        "RasteriseNoTextureZBuffer", "RasteriseNoTextureZBufferToon",
+        "RasteriseNoTextureZBufferHighlight", "RasteriseUseTextureDecalZBuffer",
+        "RasteriseUseTextureModulateZBuffer", "RasteriseUseTextureToonZBuffer",
+        "RasteriseUseTextureHighlightZBuffer", "RasteriseShadowMaskZBuffer",
+        "ClearCoarseBinMask", "ClearIndirectWorkCount", "CalculateWorkOffsets", "SortWork"
+    };
+    (void)zBufferNames;
+    static const char* finalNames[8] = {
+        "FinalPass", "FinalPassEdge", "FinalPassFog", "FinalPassEdgeFog",
+        "FinalPassAA", "FinalPassEdgeAA", "FinalPassFogAA", "FinalPassEdgeFogAA"
+    };
+    auto load = [](const char* base, int scale, dk::Shader& shader) {
+        char path[128];
+        snprintf(path, sizeof(path), "romfs:/shaders/%s_x%d.dksh", base, scale);
+        Gfx::LoadShader(path, shader);
+    };
+    scale = std::clamp(scale, 1, MaxScaleFactor);
+    const int s = scale - 1;
+    if (ShaderScaleLoaded[s])
+        return;
+
+    DekoLog("GBAStationNDSStub: GPU3D_Deko shader scale load begin scale=%d", scale);
+    load("InterpXSpansZBuffer", scale, ShaderInterpXSpans[s][0]);
+    load("InterpXSpansWBuffer", scale, ShaderInterpXSpans[s][1]);
+    load("BinCombined", scale, ShaderBinCombined[s]);
+    load("DepthBlendZBuffer", scale, ShaderDepthBlend[s][0]);
+    load("DepthBlendWBuffer", scale, ShaderDepthBlend[s][1]);
+    load("RasteriseNoTextureZBuffer", scale, ShaderRasteriseNoTexture[s][0]);
+    load("RasteriseNoTextureZBufferToon", scale, ShaderRasteriseNoTextureToon[s][0]);
+    load("RasteriseNoTextureZBufferHighlight", scale, ShaderRasteriseNoTextureHighlight[s][0]);
+    load("RasteriseUseTextureDecalZBuffer", scale, ShaderRasteriseUseTextureDecal[s][0]);
+    load("RasteriseUseTextureModulateZBuffer", scale, ShaderRasteriseUseTextureModulate[s][0]);
+    load("RasteriseUseTextureToonZBuffer", scale, ShaderRasteriseUseTextureToon[s][0]);
+    load("RasteriseUseTextureHighlightZBuffer", scale, ShaderRasteriseUseTextureHighlight[s][0]);
+    load("RasteriseShadowMaskZBuffer", scale, ShaderRasteriseShadowMask[s][0]);
+    load("RasteriseNoTextureWBuffer", scale, ShaderRasteriseNoTexture[s][1]);
+    load("RasteriseNoTextureWBufferToon", scale, ShaderRasteriseNoTextureToon[s][1]);
+    load("RasteriseNoTextureWBufferHighlight", scale, ShaderRasteriseNoTextureHighlight[s][1]);
+    load("RasteriseUseTextureDecalWBuffer", scale, ShaderRasteriseUseTextureDecal[s][1]);
+    load("RasteriseUseTextureModulateWBuffer", scale, ShaderRasteriseUseTextureModulate[s][1]);
+    load("RasteriseUseTextureToonWBuffer", scale, ShaderRasteriseUseTextureToon[s][1]);
+    load("RasteriseUseTextureHighlightWBuffer", scale, ShaderRasteriseUseTextureHighlight[s][1]);
+    load("RasteriseShadowMaskWBuffer", scale, ShaderRasteriseShadowMask[s][1]);
+    load("ClearCoarseBinMask", scale, ShaderClearCoarseBinMask[s]);
+    load("ClearIndirectWorkCount", scale, ShaderClearIndirectWorkCount[s]);
+    load("CalculateWorkOffsets", scale, ShaderCalculateWorkListOffset[s]);
+    load("SortWork", scale, ShaderSortWork[s]);
+    for (int i = 0; i < 8; ++i)
+        load(finalNames[i], scale, ShaderFinalPass[s][i]);
+    ShaderScaleLoaded[s] = true;
+    DekoLog("GBAStationNDSStub: GPU3D_Deko shader scale load ok scale=%d", scale);
+}
+
+std::size_t DekoRenderer::SortWorkWorkCountOffset() const
+{
+    return sizeof(u32) * (MaxVariants * 4 + MaxVariants);
+}
+
+std::size_t DekoRenderer::BinResultSize() const
+{
+    const std::size_t tileCount = static_cast<std::size_t>(TilesPerLine) * TileLines;
+    return sizeof(u32) * (MaxVariants * 4 + MaxVariants + 4 +
+                          static_cast<std::size_t>(MaxWorkTiles) * 4 +
+                          tileCount * (CoarseBinStride + BinStride * 2));
+}
+
+std::size_t DekoRenderer::TilesSize() const
+{
+    return sizeof(u32) * static_cast<std::size_t>(MaxWorkTiles) * TileSize * TileSize * 3;
+}
+
+std::size_t DekoRenderer::FinalTilesSize() const
+{
+    return sizeof(u32) * static_cast<std::size_t>(ScreenWidth) * ScreenHeight * 2 * 3;
+}
+
+void DekoRenderer::FreeScaleResources()
+{
+    if (!ScaleResourcesAllocated)
+        return;
+    DekoLog("GBAStationNDSStub: GPU3D_Deko scale free begin scale=%d", ScaleFactor);
+    for (int i = 0; i < 2; ++i)
     {
-        YSpanSetupMemory[i] = Gfx::DataHeap->Alloc(sizeof(SpanSetupY)*MaxYSpanSetups, 4);
-
-        RenderPolygonMemory[i] = Gfx::DataHeap->Alloc(sizeof(RenderPolygon)*2048, 4);
+        Gfx::DataHeap->Free(YSpanSetupMemory[i]);
+        Gfx::DataHeap->Free(RenderPolygonMemory[i]);
     }
+    Gfx::DataHeap->Free(XSpanSetupMemory);
+    Gfx::TextureHeap->Free(YSpanIndicesTextureMemory);
+    Gfx::DataHeap->Free(TileMemory);
+    Gfx::DataHeap->Free(BinResultMemory);
+    Gfx::DataHeap->Free(FinalTileMemory);
+    ScaleResourcesAllocated = false;
+    DekoLog("GBAStationNDSStub: GPU3D_Deko scale free ok scale=%d", ScaleFactor);
+}
 
-    TileMemory = Gfx::DataHeap->Alloc(sizeof(Tiles), alignof(Tiles));
+void DekoRenderer::AllocateScaleResources(int scale)
+{
+    scale = std::clamp(scale, 1, MaxScaleFactor);
+    if (ScaleResourcesAllocated && scale == ScaleFactor)
+        return;
+    LoadShaders(scale);
+    Gfx::EmuQueue.waitIdle();
+    FreeScaleResources();
 
-    XSpanSetupMemory = Gfx::DataHeap->Alloc(sizeof(SpanSetupX)*MaxYSpanIndices, alignof(SpanSetupX));
+    ScaleFactor = scale;
+    ScreenWidth = 256 * scale;
+    ScreenHeight = 192 * scale;
+    TilesPerLine = ScreenWidth / TileSize;
+    TileLines = ScreenHeight / TileSize;
+    MaxWorkTiles = TilesPerLine * TileLines * 48;
+    MaxYSpanIndices = 64 * 2048 * scale;
+    MaxYSpanSetups = 6144 * 2 * scale;
+    DekoLog("GBAStationNDSStub: GPU3D_Deko scale configure scale=%d screen=%dx%d tiles=%dx%d maxWork=%d yIndices=%d ySetups=%d tileBytes=%llu binBytes=%llu finalBytes=%llu",
+            scale, ScreenWidth, ScreenHeight, TilesPerLine, TileLines, MaxWorkTiles,
+            MaxYSpanIndices, MaxYSpanSetups,
+            static_cast<unsigned long long>(TilesSize()),
+            static_cast<unsigned long long>(BinResultSize()),
+            static_cast<unsigned long long>(FinalTilesSize()));
+    DekoLog("GBAStationNDSStub: GPU3D_Deko CPU vectors resize begin scale=%d", scale);
+    YSpanIndices.resize(MaxYSpanIndices);
+    YSpanSetups.resize(MaxYSpanSetups);
+    RenderPolygons.resize(2048);
+    DekoLog("GBAStationNDSStub: GPU3D_Deko CPU vectors resize ok scale=%d", scale);
 
-    BinResultMemory = Gfx::DataHeap->Alloc(sizeof(BinResult), alignof(BinResult));
-    memset(Gfx::DataHeap->CpuAddr<void>(BinResultMemory), 0, sizeof(BinResult));
-
-    FinalTileMemory = Gfx::DataHeap->Alloc(sizeof(FinalTiles), alignof(FinalTiles));
-
+    for (int i = 0; i < 2; ++i)
+    {
+        DekoLog("GBAStationNDSStub: GPU3D_Deko ySpan alloc begin slice=%d bytes=%llu",
+                i, static_cast<unsigned long long>(sizeof(SpanSetupY) * MaxYSpanSetups));
+        YSpanSetupMemory[i] = Gfx::DataHeap->Alloc(sizeof(SpanSetupY) * MaxYSpanSetups, 4);
+        DekoLog("GBAStationNDSStub: GPU3D_Deko ySpan alloc ok slice=%d offset=%u size=%u",
+                i, YSpanSetupMemory[i].Offset, YSpanSetupMemory[i].Size);
+        DekoLog("GBAStationNDSStub: GPU3D_Deko polygon alloc begin slice=%d bytes=%llu",
+                i, static_cast<unsigned long long>(sizeof(RenderPolygon) * 2048));
+        RenderPolygonMemory[i] = Gfx::DataHeap->Alloc(sizeof(RenderPolygon) * 2048, 4);
+        DekoLog("GBAStationNDSStub: GPU3D_Deko polygon alloc ok slice=%d offset=%u size=%u",
+                i, RenderPolygonMemory[i].Offset, RenderPolygonMemory[i].Size);
+    }
+    DekoLog("GBAStationNDSStub: GPU3D_Deko xSpan alloc begin bytes=%llu",
+            static_cast<unsigned long long>(sizeof(SpanSetupX) * MaxYSpanIndices));
+    XSpanSetupMemory = Gfx::DataHeap->Alloc(sizeof(SpanSetupX) * MaxYSpanIndices, alignof(SpanSetupX));
+    DekoLog("GBAStationNDSStub: GPU3D_Deko xSpan alloc ok offset=%u size=%u",
+            XSpanSetupMemory.Offset, XSpanSetupMemory.Size);
     dk::ImageLayout yspanIndicesLayout;
-    dk::ImageLayoutMaker{Gfx::Device}
-        .setType(DkImageType_Buffer)
-        .setDimensions(MaxYSpanIndices)
-        .setFormat(DkImageFormat_RGBA16_Uint)
-        .initialize(yspanIndicesLayout);
+    dk::ImageLayoutMaker{Gfx::Device}.setType(DkImageType_Buffer).setDimensions(MaxYSpanIndices)
+        .setFormat(DkImageFormat_RGBA16_Uint).initialize(yspanIndicesLayout);
+    DekoLog("GBAStationNDSStub: GPU3D_Deko ySpan texture alloc begin bytes=%llu align=%u",
+            static_cast<unsigned long long>(yspanIndicesLayout.getSize()), yspanIndicesLayout.getAlignment());
     YSpanIndicesTextureMemory = Gfx::TextureHeap->Alloc(yspanIndicesLayout.getSize(), yspanIndicesLayout.getAlignment());
     YSpanIndicesTexture.initialize(yspanIndicesLayout, Gfx::TextureHeap->MemBlock, YSpanIndicesTextureMemory.Offset);
+    DekoLog("GBAStationNDSStub: GPU3D_Deko ySpan texture alloc ok offset=%u size=%u",
+            YSpanIndicesTextureMemory.Offset, YSpanIndicesTextureMemory.Size);
+    if (DescriptorsInitialized)
+    {
+        auto* descriptors = Gfx::DataHeap->CpuAddr<dk::ImageDescriptor>(ImageDescriptors);
+        descriptors[descriptorOffset_YSpanIndices].initialize(YSpanIndicesTexture, true);
+    }
+    DekoLog("GBAStationNDSStub: GPU3D_Deko tile alloc begin bytes=%llu",
+            static_cast<unsigned long long>(TilesSize()));
+    TileMemory = Gfx::DataHeap->Alloc(TilesSize(), 32);
+    DekoLog("GBAStationNDSStub: GPU3D_Deko tile alloc ok offset=%u size=%u", TileMemory.Offset, TileMemory.Size);
+    DekoLog("GBAStationNDSStub: GPU3D_Deko bin alloc begin bytes=%llu",
+            static_cast<unsigned long long>(BinResultSize()));
+    BinResultMemory = Gfx::DataHeap->Alloc(BinResultSize(), 32);
+    DekoLog("GBAStationNDSStub: GPU3D_Deko bin alloc ok offset=%u size=%u", BinResultMemory.Offset, BinResultMemory.Size);
+    memset(Gfx::DataHeap->CpuAddr<void>(BinResultMemory), 0, BinResultSize());
+    DekoLog("GBAStationNDSStub: GPU3D_Deko final alloc begin bytes=%llu",
+            static_cast<unsigned long long>(FinalTilesSize()));
+    FinalTileMemory = Gfx::DataHeap->Alloc(FinalTilesSize(), 32);
+    DekoLog("GBAStationNDSStub: GPU3D_Deko final alloc ok offset=%u size=%u", FinalTileMemory.Offset, FinalTileMemory.Size);
+    ScaleResourcesAllocated = true;
+    DekoLog("GBAStationNDSStub: GPU3D_Deko scale=%d screen=%dx%d dataMB=%.1f",
+            ScaleFactor, ScreenWidth, ScreenHeight,
+            static_cast<double>(TilesSize() + BinResultSize() + FinalTilesSize()) / (1024.0 * 1024.0));
+}
 
-    Gfx::LoadShader("romfs:/shaders/InterpXSpansZBuffer.dksh", ShaderInterpXSpans[0]);
-    Gfx::LoadShader("romfs:/shaders/InterpXSpansWBuffer.dksh", ShaderInterpXSpans[1]);
-    Gfx::LoadShader("romfs:/shaders/BinCombined.dksh", ShaderBinCombined);
-    Gfx::LoadShader("romfs:/shaders/DepthBlendZBuffer.dksh", ShaderDepthBlend[0]);
-    Gfx::LoadShader("romfs:/shaders/DepthBlendWBuffer.dksh", ShaderDepthBlend[1]);
-    Gfx::LoadShader("romfs:/shaders/RasteriseNoTextureZBuffer.dksh", ShaderRasteriseNoTexture[0]);
-    Gfx::LoadShader("romfs:/shaders/RasteriseNoTextureZBufferToon.dksh", ShaderRasteriseNoTextureToon[0]);
-    Gfx::LoadShader("romfs:/shaders/RasteriseNoTextureZBufferHighlight.dksh", ShaderRasteriseNoTextureHighlight[0]);
-    Gfx::LoadShader("romfs:/shaders/RasteriseUseTextureDecalZBuffer.dksh", ShaderRasteriseUseTextureDecal[0]);
-    Gfx::LoadShader("romfs:/shaders/RasteriseUseTextureModulateZBuffer.dksh", ShaderRasteriseUseTextureModulate[0]);
-    Gfx::LoadShader("romfs:/shaders/RasteriseUseTextureToonZBuffer.dksh", ShaderRasteriseUseTextureToon[0]);
-    Gfx::LoadShader("romfs:/shaders/RasteriseUseTextureHighlightZBuffer.dksh", ShaderRasteriseUseTextureHighlight[0]);
-    Gfx::LoadShader("romfs:/shaders/RasteriseShadowMaskZBuffer.dksh", ShaderRasteriseShadowMask[0]);
-    Gfx::LoadShader("romfs:/shaders/RasteriseNoTextureWBuffer.dksh", ShaderRasteriseNoTexture[1]);
-    Gfx::LoadShader("romfs:/shaders/RasteriseNoTextureWBufferToon.dksh", ShaderRasteriseNoTextureToon[1]);
-    Gfx::LoadShader("romfs:/shaders/RasteriseNoTextureWBufferHighlight.dksh", ShaderRasteriseNoTextureHighlight[1]);
-    Gfx::LoadShader("romfs:/shaders/RasteriseUseTextureDecalWBuffer.dksh", ShaderRasteriseUseTextureDecal[1]);
-    Gfx::LoadShader("romfs:/shaders/RasteriseUseTextureModulateWBuffer.dksh", ShaderRasteriseUseTextureModulate[1]);
-    Gfx::LoadShader("romfs:/shaders/RasteriseUseTextureToonWBuffer.dksh", ShaderRasteriseUseTextureToon[1]);
-    Gfx::LoadShader("romfs:/shaders/RasteriseUseTextureHighlightWBuffer.dksh", ShaderRasteriseUseTextureHighlight[1]);
-    Gfx::LoadShader("romfs:/shaders/RasteriseShadowMaskWBuffer.dksh", ShaderRasteriseShadowMask[1]);
-    Gfx::LoadShader("romfs:/shaders/ClearCoarseBinMask.dksh", ShaderClearCoarseBinMask);
-    Gfx::LoadShader("romfs:/shaders/ClearIndirectWorkCount.dksh", ShaderClearIndirectWorkCount);
-    Gfx::LoadShader("romfs:/shaders/CalculateWorkOffsets.dksh", ShaderCalculateWorkListOffset);
-    Gfx::LoadShader("romfs:/shaders/SortWork.dksh", ShaderSortWork);
-    Gfx::LoadShader("romfs:/shaders/FinalPass.dksh", ShaderFinalPass[0]);
-    Gfx::LoadShader("romfs:/shaders/FinalPassEdge.dksh", ShaderFinalPass[1]);
-    Gfx::LoadShader("romfs:/shaders/FinalPassFog.dksh", ShaderFinalPass[2]);
-    Gfx::LoadShader("romfs:/shaders/FinalPassEdgeFog.dksh", ShaderFinalPass[3]);
-    Gfx::LoadShader("romfs:/shaders/FinalPassAA.dksh", ShaderFinalPass[4]);
-    Gfx::LoadShader("romfs:/shaders/FinalPassEdgeAA.dksh", ShaderFinalPass[5]);
-    Gfx::LoadShader("romfs:/shaders/FinalPassFogAA.dksh", ShaderFinalPass[6]);
-    Gfx::LoadShader("romfs:/shaders/FinalPassEdgeFogAA.dksh", ShaderFinalPass[7]);
+bool DekoRenderer::Init()
+{
+    DekoLog("GBAStationNDSStub: GPU3D_Deko init begin");
+    DekoLog("GBAStationNDSStub: GPU3D_Deko LoadShaders begin");
+    LoadShaders(1);
+    DekoLog("GBAStationNDSStub: GPU3D_Deko LoadShaders ok");
+    DekoLog("GBAStationNDSStub: GPU3D_Deko AllocateScaleResources begin scale=1");
+    AllocateScaleResources(1);
+    DekoLog("GBAStationNDSStub: GPU3D_Deko AllocateScaleResources ok scale=1");
 
     {
         ImageDescriptors = Gfx::DataHeap->Alloc(sizeof(dk::ImageDescriptor)*descriptorOffset_Count, DK_IMAGE_DESCRIPTOR_ALIGNMENT);
         dk::ImageDescriptor* descriptors = Gfx::DataHeap->CpuAddr<dk::ImageDescriptor>(ImageDescriptors);
         descriptors[descriptorOffset_YSpanIndices].initialize(YSpanIndicesTexture, true);
         descriptors[descriptorOffset_FinalFB].initialize(((GPU2D::DekoRenderer*)GPU::GPU2D_Renderer.get())->Get3DFramebuffer(), true);
+        descriptors[descriptorOffset_LowResFB].initialize(((GPU2D::DekoRenderer*)GPU::GPU2D_Renderer.get())->Get3DFramebufferLowRes(), true);
+        DescriptorsInitialized = true;
     }
 
     {
@@ -114,12 +270,14 @@ bool DekoRenderer::Init()
 
     MetaUniformMemory = Gfx::DataHeap->Alloc(MetaUniformSize, DK_UNIFORM_BUF_ALIGNMENT);
 
+    DekoLog("GBAStationNDSStub: GPU3D_Deko init ok");
     return true;
 }
 
 void DekoRenderer::DeInit()
 {
-
+    Gfx::EmuQueue.waitIdle();
+    FreeScaleResources();
 }
 
 void DekoRenderer::Reset()
@@ -145,7 +303,8 @@ void DekoRenderer::Reset()
 
 void DekoRenderer::SetRenderSettings(GPU::RenderSettings& settings)
 {
-
+    BetterPolygons = settings.GL_BetterPolygons;
+    AllocateScaleResources(settings.GL_ScaleFactor);
 }
 
 void DekoRenderer::VCount144()
@@ -171,9 +330,9 @@ void DekoRenderer::SetupAttrs(SpanSetupY* span, Polygon* poly, int from, int to)
     span->TexcoordV1 = poly->Vertices[to]->TexCoords[1];
 }
 
-void DekoRenderer::SetupYSpanDummy(SpanSetupY* span, Polygon* poly, int vertex, int side)
+void DekoRenderer::SetupYSpanDummy(SpanSetupY* span, Polygon* poly, int vertex, int side, const s32 scaledPositions[][2])
 {
-    s32 x0 = poly->Vertices[vertex]->FinalPosition[0];
+    s32 x0 = scaledPositions[vertex][0];
     if (side)
     {
         span->DxInitial = -0x40000;
@@ -187,7 +346,7 @@ void DekoRenderer::SetupYSpanDummy(SpanSetupY* span, Polygon* poly, int vertex, 
     span->X0 = span->X1 = x0;
     span->XMin = x0;
     span->XMax = x0;
-    span->Y0 = span->Y1 = poly->Vertices[vertex]->FinalPosition[1];
+    span->Y0 = span->Y1 = scaledPositions[vertex][1];
 
     span->Increment = 0;
 
@@ -201,12 +360,12 @@ void DekoRenderer::SetupYSpanDummy(SpanSetupY* span, Polygon* poly, int vertex, 
     SetupAttrs(span, poly, vertex, vertex);
 }
 
-void DekoRenderer::SetupYSpan(int polynum, SpanSetupY* span, Polygon* poly, int from, int to, u32 y, int side)
+void DekoRenderer::SetupYSpan(int polynum, SpanSetupY* span, Polygon* poly, int from, int to, u32 y, int side, const s32 scaledPositions[][2])
 {
-    span->X0 = poly->Vertices[from]->FinalPosition[0];
-    span->X1 = poly->Vertices[to]->FinalPosition[0];
-    span->Y0 = poly->Vertices[from]->FinalPosition[1];
-    span->Y1 = poly->Vertices[to]->FinalPosition[1];
+    span->X0 = scaledPositions[from][0];
+    span->X1 = scaledPositions[to][0];
+    span->Y0 = scaledPositions[from][1];
+    span->Y1 = scaledPositions[to][1];
 
     SetupAttrs(span, poly, from, to);
 
@@ -433,26 +592,39 @@ enum
     outputFmt_BGRA8
 };
 
+template<typename T>
+static inline T ReadFlatTexture(u32 addr)
+{
+    return *(T*)&GPU::VRAMFlat_Texture[addr & 0x7FFFF];
+}
+
+template<typename T>
+static inline T ReadFlatTexPal(u32 addr)
+{
+    return *(T*)&GPU::VRAMFlat_TexPal[addr & 0x1FFFF];
+}
+
 template <int outputFmt>
-void ConvertCompressedTexture(u32 width, u32 height, u32* output, u8* texData, u8* texAuxData, u16* palData)
+void ConvertCompressedTexture(u32 width, u32 height, u32* output, u32 texAddr, u32 texAuxAddr, u32 palAddr)
 {
     // we process a whole block at the time
     for (int y = 0; y < height / 4; y++)
     {
         for (int x = 0; x < width / 4; x++)
         {
-            u32 data = ((u32*)texData)[x + y * (width / 4)];
-            u16 auxData = ((u16*)texAuxData)[x + y * (width / 4)];
+            u32 block = x + y * (width / 4);
+            u32 data = ReadFlatTexture<u32>(texAddr + block * 4);
+            u16 auxData = ReadFlatTexture<u16>(texAuxAddr + block * 2);
 
-            u32 paletteOffset = auxData & 0x3FFF;
-            u16 color0 = palData[paletteOffset*2] | 0x8000;
-            u16 color1 = palData[paletteOffset*2+1] | 0x8000;
+            u32 paletteOffset = palAddr + (auxData & 0x3FFF) * 4;
+            u16 color0 = ReadFlatTexPal<u16>(paletteOffset) | 0x8000;
+            u16 color1 = ReadFlatTexPal<u16>(paletteOffset + 2) | 0x8000;
             u16 color2, color3;
 
             switch ((auxData >> 14) & 0x3)
             {
             case 0:
-                color2 = palData[paletteOffset*2+2] | 0x8000;
+                color2 = ReadFlatTexPal<u16>(paletteOffset + 4) | 0x8000;
                 color3 = 0;
                 break;
             case 1:
@@ -472,8 +644,8 @@ void ConvertCompressedTexture(u32 width, u32 height, u32* output, u8* texData, u
                 color3 = 0;
                 break;
             case 2:
-                color2 = palData[paletteOffset*2+2] | 0x8000;
-                color3 = palData[paletteOffset*2+3] | 0x8000;
+                color2 = ReadFlatTexPal<u16>(paletteOffset + 4) | 0x8000;
+                color3 = ReadFlatTexPal<u16>(paletteOffset + 6) | 0x8000;
                 break;
             case 3:
                 {
@@ -514,7 +686,8 @@ void ConvertCompressedTexture(u32 width, u32 height, u32* output, u8* texData, u
             {
                 for (int i = 0; i < 4; i++)
                 {
-                    u16 color = (packed >> 16 * (data >> 2 * (i + j * 4))) & 0xFFFF;
+                    u32 colorIdx = 16 * ((data >> (2 * (i + j * 4))) & 0x3);
+                    u16 color = (packed >> colorIdx) & 0xFFFF;
                     u32 res;
                     switch (outputFmt)
                     {
@@ -533,17 +706,17 @@ void ConvertCompressedTexture(u32 width, u32 height, u32* output, u8* texData, u
 }
 
 template <int outputFmt, int X, int Y>
-void ConvertAXIYTexture(u32 width, u32 height, u32* output, u8* texData, u16* palData)
+void ConvertAXIYTexture(u32 width, u32 height, u32* output, u32 texAddr, u32 palAddr)
 {
     for (int y = 0; y < height; y++)
     {
         for (int x = 0; x < width; x++)
         {
-            u8 val = texData[x + y * width];
+            u8 val = ReadFlatTexture<u8>(texAddr + x + y * width);
 
             u32 idx = val & ((1 << Y) - 1);
 
-            u16 color = palData[idx];
+            u16 color = ReadFlatTexPal<u16>(palAddr + idx * 2);
             u32 alpha = (val >> Y) & ((1 << X) - 1);
             if (X != 5)
                 alpha = alpha * 4 + alpha / 2;
@@ -598,18 +771,19 @@ void Convert16ColorsTexture(u32 width, u32 height, u32* output, u8* texData, u16
 }
 
 template <int outputFmt, int colorBits>
-void ConvertNColorsTexture(u32 width, u32 height, u32* output, u8* texData, u16* palData, bool color0Transparent)
+void ConvertNColorsTexture(u32 width, u32 height, u32* output,
+    u32 texAddr, u32 palAddr, bool color0Transparent)
 {
     for (int y = 0; y < height; y++)
     {
         for (int x = 0; x < width / (8 / colorBits); x++)
         {
-            u8 val = texData[x + y * (width / (8 / colorBits))];
+            u8 val = ReadFlatTexture<u8>(texAddr + x + y * (width / (8 / colorBits)));
 
             for (int i = 0; i < 8 / colorBits; i++)
             {
                 u32 index = (val >> (i * colorBits)) & ((1 << colorBits) - 1);
-                u16 color = palData[index];
+                u16 color = ReadFlatTexPal<u16>(palAddr + index * 2);
 
                 bool transparent = color0Transparent && index == 0;
                 u32 res;
@@ -626,6 +800,43 @@ void ConvertNColorsTexture(u32 width, u32 height, u32* output, u8* texData, u16*
             }
         }
     }
+}
+
+static u64 MaskedVRAMHash(const u8* vram, u32 vramSize, u32 addr, u32 size)
+{
+    u64 hash = 0;
+    addr &= vramSize - 1;
+
+    while (size > 0)
+    {
+        u32 pieceSize = std::min(size, vramSize - addr);
+        hash = XXH64(&vram[addr], pieceSize, hash);
+        size -= pieceSize;
+        addr = (addr + pieceSize) & (vramSize - 1);
+    }
+
+    return hash;
+}
+
+static bool CheckVRAMRangeInvalid(u32 start, u32 size, u64 oldHash,
+    const u64* dirty, const u8* vram, u32 vramSize)
+{
+    u32 startBit = start / GPU::VRAMDirtyGranularity;
+    u32 bitsCount = ((start + size + GPU::VRAMDirtyGranularity - 1)
+        / GPU::VRAMDirtyGranularity) - startBit;
+
+    u32 startEntry = startBit >> 6;
+    u32 entriesCount = ((startBit + bitsCount + 0x3F) >> 6) - startEntry;
+    u32 dirtyEntryMask = (vramSize / GPU::VRAMDirtyGranularity / 64) - 1;
+    for (u32 j = startEntry; j < startEntry + entriesCount; j++)
+    {
+        if (GetRangedBitMask(j, startBit, bitsCount) & dirty[j & dirtyEntryMask])
+        {
+            return MaskedVRAMHash(vram, vramSize, start, size) != oldHash;
+        }
+    }
+
+    return false;
 }
 
 DekoRenderer::TexCacheEntry& DekoRenderer::GetTexture(u32 texParam, u32 palBase)
@@ -668,33 +879,19 @@ DekoRenderer::TexCacheEntry& DekoRenderer::GetTexture(u32 texParam, u32 palBase)
     {
         entry.TextureRAMSize[0] = width*height*2;
 
-        for (u32 i = 0; i < width*height; i += 16)
+        for (u32 i = 0; i < width*height; i++)
         {
-            uint8x16x2_t pixels = vld2q_u8(&GPU::VRAMFlat_Texture[addr + i * 2]);
-
-            uint8x16_t red, green, blue;
-            RGB5ToRGB6(pixels.val[0], pixels.val[1], red, green, blue);
-            uint8x16_t alpha = vbslq_u8(vtstq_u8(pixels.val[1], vdupq_n_u8(0x80)), vdupq_n_u8(0x1F), vdupq_n_u8(0));
-
-            vst4q_u8((u8*)&TextureDecodingBuffer[i],
-            {
-                red,
-                green,
-                blue,
-                alpha
-            });
+            u16 color = ReadFlatTexture<u16>(addr + i * 2);
+            TextureDecodingBuffer[i] = ConvertRGB5ToRGB6(color)
+                | ((color & 0x8000) ? 0x1F000000 : 0);
         }
 
     }
     else if (fmt == 5)
     {
-        u8* texData = &GPU::VRAMFlat_Texture[addr];
         u32 slot1addr = 0x20000 + ((addr & 0x1FFFC) >> 1);
         if (addr >= 0x40000)
             slot1addr += 0x10000;
-        u8* texAuxData = &GPU::VRAMFlat_Texture[slot1addr];
-
-        u16* palData = (u16*)(GPU::VRAMFlat_TexPal + palBase*16);
 
         entry.TextureRAMSize[0] = width*height/16*4;
         entry.TextureRAMStart[1] = slot1addr;
@@ -702,7 +899,8 @@ DekoRenderer::TexCacheEntry& DekoRenderer::GetTexture(u32 texParam, u32 palBase)
         entry.TexPalStart = palBase*16;
         entry.TexPalSize = 0x10000;
 
-        ConvertCompressedTexture<outputFmt_RGB6A5>(width, height, TextureDecodingBuffer, texData, texAuxData, palData);
+        ConvertCompressedTexture<outputFmt_RGB6A5>(width, height, TextureDecodingBuffer,
+            addr, slot1addr, entry.TexPalStart);
     }
     else
     {
@@ -725,30 +923,27 @@ DekoRenderer::TexCacheEntry& DekoRenderer::GetTexture(u32 texParam, u32 palBase)
         entry.TexPalStart = palAddr;
         entry.TexPalSize = numPalEntries*2;
 
-        u8* texData = &GPU::VRAMFlat_Texture[addr];
-        u16* palData = (u16*)(GPU::VRAMFlat_TexPal + palAddr);
-
-        //assert(entry.TexPalStart+entry.TexPalSize <= 128*1024*1024);
-
         bool color0Transparent = texParam & (1 << 29);
 
         switch (fmt)
         {
-        case 1: ConvertAXIYTexture<outputFmt_RGB6A5, 3, 5>(width, height, TextureDecodingBuffer, texData, palData); break;
-        case 6: ConvertAXIYTexture<outputFmt_RGB6A5, 5, 3>(width, height, TextureDecodingBuffer, texData, palData); break;
-        case 2: ConvertNColorsTexture<outputFmt_RGB6A5, 2>(width, height, TextureDecodingBuffer, texData, palData, color0Transparent); break;
-        case 3: Convert16ColorsTexture(width, height, TextureDecodingBuffer, texData, palData, color0Transparent); break;
-        case 4: ConvertNColorsTexture<outputFmt_RGB6A5, 8>(width, height, TextureDecodingBuffer, texData, palData, color0Transparent); break;
+        case 1: ConvertAXIYTexture<outputFmt_RGB6A5, 3, 5>(width, height, TextureDecodingBuffer, addr, palAddr); break;
+        case 6: ConvertAXIYTexture<outputFmt_RGB6A5, 5, 3>(width, height, TextureDecodingBuffer, addr, palAddr); break;
+        case 2: ConvertNColorsTexture<outputFmt_RGB6A5, 2>(width, height, TextureDecodingBuffer, addr, palAddr, color0Transparent); break;
+        case 3: ConvertNColorsTexture<outputFmt_RGB6A5, 4>(width, height, TextureDecodingBuffer, addr, palAddr, color0Transparent); break;
+        case 4: ConvertNColorsTexture<outputFmt_RGB6A5, 8>(width, height, TextureDecodingBuffer, addr, palAddr, color0Transparent); break;
         }
     }
 
     for (int i = 0; i < 2; i++)
     {
         if (entry.TextureRAMSize[i])
-            entry.TextureHash[i] = XXH3_64bits(&GPU::VRAMFlat_Texture[entry.TextureRAMStart[i]], entry.TextureRAMSize[i]);
+            entry.TextureHash[i] = MaskedVRAMHash(GPU::VRAMFlat_Texture,
+                sizeof(GPU::VRAMFlat_Texture), entry.TextureRAMStart[i], entry.TextureRAMSize[i]);
     }
     if (entry.TexPalSize)
-        entry.TexPalHash = XXH3_64bits(&GPU::VRAMFlat_TexPal[entry.TexPalStart], entry.TexPalSize);
+        entry.TexPalHash = MaskedVRAMHash(GPU::VRAMFlat_TexPal,
+            sizeof(GPU::VRAMFlat_TexPal), entry.TexPalStart, entry.TexPalSize);
 
     auto& texArrays = TexArrays[widthLog2][heightLog2];
     auto& freeTextures = FreeTextures[widthLog2][heightLog2];
@@ -852,40 +1047,19 @@ void DekoRenderer::RenderFrame()
             {
                 for (u32 i = 0; i < 2; i++)
                 {
-                    u32 startBit = entry.TextureRAMStart[i] / GPU::VRAMDirtyGranularity;
-                    u32 bitsCount = ((entry.TextureRAMStart[i] + entry.TextureRAMSize[i] + GPU::VRAMDirtyGranularity - 1) / GPU::VRAMDirtyGranularity) - startBit;
-
-                    u32 startEntry = startBit >> 6;
-                    u64 entriesCount = ((startBit + bitsCount + 0x3F) >> 6) - startEntry;
-                    for (u32 j = startEntry; j < startEntry + entriesCount; j++)
-                    {
-                        if (GetRangedBitMask(j, startBit, bitsCount) & textureDirty.Data[j])
-                        {
-                            u64 newTexHash = XXH3_64bits(&GPU::VRAMFlat_Texture[entry.TextureRAMStart[i]], entry.TextureRAMSize[i]);
-
-                            if (newTexHash != entry.TextureHash[i])
-                                goto invalidate;
-                        }
-                    }
+                    if (entry.TextureRAMSize[i] && CheckVRAMRangeInvalid(
+                        entry.TextureRAMStart[i], entry.TextureRAMSize[i], entry.TextureHash[i],
+                        textureDirty.Data, GPU::VRAMFlat_Texture, sizeof(GPU::VRAMFlat_Texture)))
+                        goto invalidate;
                 }
             }
 
             if (texPalChanged && entry.TexPalSize > 0)
             {
-                u32 startBit = entry.TexPalStart / GPU::VRAMDirtyGranularity;
-                u32 bitsCount = ((entry.TexPalStart + entry.TexPalSize + GPU::VRAMDirtyGranularity - 1) / GPU::VRAMDirtyGranularity) - startBit;
-
-                u32 startEntry = startBit >> 6;
-                u64 entriesCount = ((startBit + bitsCount + 0x3F) >> 6) - startEntry;
-                for (u32 j = startEntry; j < startEntry + entriesCount; j++)
-                {
-                    if (GetRangedBitMask(j, startBit, bitsCount) & texPalDirty.Data[j])
-                    {
-                        u64 newPalHash = XXH3_64bits(&GPU::VRAMFlat_TexPal[entry.TexPalStart], entry.TexPalSize);
-                        if (newPalHash != entry.TexPalHash)
-                            goto invalidate;
-                    }
-                }
+                if (CheckVRAMRangeInvalid(entry.TexPalStart, entry.TexPalSize,
+                    entry.TexPalHash, texPalDirty.Data,
+                    GPU::VRAMFlat_TexPal, sizeof(GPU::VRAMFlat_TexPal)))
+                    goto invalidate;
             }
 
             it++;
@@ -921,7 +1095,24 @@ void DekoRenderer::RenderFrame()
 
         u32 nverts = polygon->NumVertices;
         u32 vtop = polygon->VTop, vbot = polygon->VBottom;
-        s32 ytop = polygon->YTop, ybot = polygon->YBottom;
+        s32 scaledPositions[10][2];
+        s32 ytop = ScreenHeight;
+        s32 ybot = 0;
+        for (u32 j = 0; j < nverts; j++)
+        {
+            if (BetterPolygons)
+            {
+                scaledPositions[j][0] = (polygon->Vertices[j]->HiresPosition[0] * ScaleFactor) >> 4;
+                scaledPositions[j][1] = (polygon->Vertices[j]->HiresPosition[1] * ScaleFactor) >> 4;
+            }
+            else
+            {
+                scaledPositions[j][0] = polygon->Vertices[j]->FinalPosition[0] * ScaleFactor;
+                scaledPositions[j][1] = polygon->Vertices[j]->FinalPosition[1] * ScaleFactor;
+            }
+            if (scaledPositions[j][1] < ytop) ytop = scaledPositions[j][1];
+            if (scaledPositions[j][1] > ybot) ybot = scaledPositions[j][1];
+        }
 
         u32 curVL = vtop, curVR = vtop;
         u32 nextVL, nextVR;
@@ -1011,10 +1202,10 @@ void DekoRenderer::RenderFrame()
             if (nextVR >= nverts) nextVR = 0;
         }
 
-        s32 minX = polygon->Vertices[vtop]->FinalPosition[0];
-        s32 minXY = polygon->Vertices[vtop]->FinalPosition[1];
-        s32 maxX = polygon->Vertices[vtop]->FinalPosition[0];
-        s32 maxXY = polygon->Vertices[vtop]->FinalPosition[1];
+        s32 minX = scaledPositions[vtop][0];
+        s32 minXY = scaledPositions[vtop][1];
+        s32 maxX = scaledPositions[vtop][0];
+        s32 maxXY = scaledPositions[vtop][1];
 
         if (ybot == ytop)
         {
@@ -1023,19 +1214,19 @@ void DekoRenderer::RenderFrame()
             RenderPolygons[i].YBot++;
 
             int j = 1;
-            if (polygon->Vertices[j]->FinalPosition[0] < polygon->Vertices[vtop]->FinalPosition[0]) vtop = j;
-            if (polygon->Vertices[j]->FinalPosition[0] > polygon->Vertices[vbot]->FinalPosition[0]) vbot = j;
+            if (scaledPositions[j][0] < scaledPositions[vtop][0]) vtop = j;
+            if (scaledPositions[j][0] > scaledPositions[vbot][0]) vbot = j;
 
             j = nverts - 1;
-            if (polygon->Vertices[j]->FinalPosition[0] < polygon->Vertices[vtop]->FinalPosition[0]) vtop = j;
-            if (polygon->Vertices[j]->FinalPosition[0] > polygon->Vertices[vbot]->FinalPosition[0]) vbot = j;
+            if (scaledPositions[j][0] < scaledPositions[vtop][0]) vtop = j;
+            if (scaledPositions[j][0] > scaledPositions[vbot][0]) vbot = j;
 
             assert(numYSpans < MaxYSpanSetups);
             u32 curSpanL = numYSpans;
-            SetupYSpanDummy(&YSpanSetups[numYSpans++], polygon, vtop, 0);
+            SetupYSpanDummy(&YSpanSetups[numYSpans++], polygon, vtop, 0, scaledPositions);
             assert(numYSpans < MaxYSpanSetups);
             u32 curSpanR = numYSpans;
-            SetupYSpanDummy(&YSpanSetups[numYSpans++], polygon, vbot, 1);
+            SetupYSpanDummy(&YSpanSetups[numYSpans++], polygon, vbot, 1, scaledPositions);
 
             minX = YSpanSetups[curSpanL].X0;
             minXY = YSpanSetups[curSpanL].Y0;
@@ -1058,16 +1249,16 @@ void DekoRenderer::RenderFrame()
         {
             u32 curSpanL = numYSpans;
             assert(numYSpans < MaxYSpanSetups);
-            SetupYSpan(i, &YSpanSetups[numYSpans++], polygon, curVL, nextVL, ytop, 0);
+            SetupYSpan(i, &YSpanSetups[numYSpans++], polygon, curVL, nextVL, ytop, 0, scaledPositions);
             u32 curSpanR = numYSpans;
             assert(numYSpans < MaxYSpanSetups);
-            SetupYSpan(i, &YSpanSetups[numYSpans++], polygon, curVR, nextVR, ytop, 1);
+            SetupYSpan(i, &YSpanSetups[numYSpans++], polygon, curVR, nextVR, ytop, 1, scaledPositions);
 
             for (u32 y = ytop; y < ybot; y++)
             {
-                if (y >= polygon->Vertices[nextVL]->FinalPosition[1] && curVL != polygon->VBottom)
+                if (y >= scaledPositions[nextVL][1] && curVL != polygon->VBottom)
                 {
-                    while (y >= polygon->Vertices[nextVL]->FinalPosition[1] && curVL != polygon->VBottom)
+                    while (y >= scaledPositions[nextVL][1] && curVL != polygon->VBottom)
                     {
                         curVL = nextVL;
                         if (polygon->FacingView)
@@ -1084,24 +1275,24 @@ void DekoRenderer::RenderFrame()
                         }
                     }
 
-                    if (polygon->Vertices[curVL]->FinalPosition[0] < minX)
+                    if (scaledPositions[curVL][0] < minX)
                     {
-                        minX = polygon->Vertices[curVL]->FinalPosition[0];
-                        minXY = polygon->Vertices[curVL]->FinalPosition[1];
+                        minX = scaledPositions[curVL][0];
+                        minXY = scaledPositions[curVL][1];
                     }
-                    if (polygon->Vertices[curVL]->FinalPosition[0] > maxX)
+                    if (scaledPositions[curVL][0] > maxX)
                     {
-                        maxX = polygon->Vertices[curVL]->FinalPosition[0];
-                        maxXY = polygon->Vertices[curVL]->FinalPosition[1];
+                        maxX = scaledPositions[curVL][0];
+                        maxXY = scaledPositions[curVL][1];
                     }
 
                     assert(numYSpans < MaxYSpanSetups);
                     curSpanL = numYSpans;
-                    SetupYSpan(i,&YSpanSetups[numYSpans++], polygon, curVL, nextVL, y, 0);
+                    SetupYSpan(i,&YSpanSetups[numYSpans++], polygon, curVL, nextVL, y, 0, scaledPositions);
                 }
-                if (y >= polygon->Vertices[nextVR]->FinalPosition[1] && curVR != polygon->VBottom)
+                if (y >= scaledPositions[nextVR][1] && curVR != polygon->VBottom)
                 {
-                    while (y >= polygon->Vertices[nextVR]->FinalPosition[1] && curVR != polygon->VBottom)
+                    while (y >= scaledPositions[nextVR][1] && curVR != polygon->VBottom)
                     {
                         curVR = nextVR;
                         if (polygon->FacingView)
@@ -1118,20 +1309,20 @@ void DekoRenderer::RenderFrame()
                         }
                     }
 
-                    if (polygon->Vertices[curVR]->FinalPosition[0] < minX)
+                    if (scaledPositions[curVR][0] < minX)
                     {
-                        minX = polygon->Vertices[curVR]->FinalPosition[0];
-                        minXY = polygon->Vertices[curVR]->FinalPosition[1];
+                        minX = scaledPositions[curVR][0];
+                        minXY = scaledPositions[curVR][1];
                     }
-                    if (polygon->Vertices[curVR]->FinalPosition[0] > maxX)
+                    if (scaledPositions[curVR][0] > maxX)
                     {
-                        maxX = polygon->Vertices[curVR]->FinalPosition[0];
-                        maxXY = polygon->Vertices[curVR]->FinalPosition[1];
+                        maxX = scaledPositions[curVR][0];
+                        maxXY = scaledPositions[curVR][1];
                     }
 
                     assert(numYSpans < MaxYSpanSetups);
                     curSpanR = numYSpans;
-                    SetupYSpan(i,&YSpanSetups[numYSpans++], polygon, curVR, nextVR, y, 1);
+                    SetupYSpan(i,&YSpanSetups[numYSpans++], polygon, curVR, nextVR, y, 1, scaledPositions);
                 }
 
                 assert(numSetupIndices < MaxYSpanIndices);
@@ -1143,25 +1334,25 @@ void DekoRenderer::RenderFrame()
             }
         }
 
-        if (polygon->Vertices[nextVL]->FinalPosition[0] < minX)
+        if (scaledPositions[nextVL][0] < minX)
         {
-            minX = polygon->Vertices[nextVL]->FinalPosition[0];
-            minXY = polygon->Vertices[nextVL]->FinalPosition[1];
+            minX = scaledPositions[nextVL][0];
+            minXY = scaledPositions[nextVL][1];
         }
-        if (polygon->Vertices[nextVL]->FinalPosition[0] > maxX)
+        if (scaledPositions[nextVL][0] > maxX)
         {
-            maxX = polygon->Vertices[nextVL]->FinalPosition[0];
-            maxXY = polygon->Vertices[nextVL]->FinalPosition[1];
+            maxX = scaledPositions[nextVL][0];
+            maxXY = scaledPositions[nextVL][1];
         }
-        if (polygon->Vertices[nextVR]->FinalPosition[0] < minX)
+        if (scaledPositions[nextVR][0] < minX)
         {
-            minX = polygon->Vertices[nextVR]->FinalPosition[0];
-            minXY = polygon->Vertices[nextVR]->FinalPosition[1];
+            minX = scaledPositions[nextVR][0];
+            minXY = scaledPositions[nextVR][1];
         }
-        if (polygon->Vertices[nextVR]->FinalPosition[0] > maxX)
+        if (scaledPositions[nextVR][0] > maxX)
         {
-            maxX = polygon->Vertices[nextVR]->FinalPosition[0];
-            maxXY = polygon->Vertices[nextVR]->FinalPosition[1];
+            maxX = scaledPositions[nextVR][0];
+            maxXY = scaledPositions[nextVR][1];
         }
 
         RenderPolygons[i].XMin = minX;
@@ -1186,10 +1377,10 @@ void DekoRenderer::RenderFrame()
     if (numYSpans > 0)
     {
         SpanSetupY* yspans = Gfx::DataHeap->CpuAddr<SpanSetupY>(YSpanSetupMemory[curSlice]);
-        memcpy(yspans, YSpanSetups, sizeof(SpanSetupY)*numYSpans);
-        UploadBuf.UploadAndCopyData(EmuCmdBuf, Gfx::TextureHeap->GpuAddr(YSpanIndicesTextureMemory), (u8*)YSpanIndices, numSetupIndices*4*2);
+        memcpy(yspans, YSpanSetups.data(), sizeof(SpanSetupY)*numYSpans);
+        UploadBuf.UploadAndCopyData(EmuCmdBuf, Gfx::TextureHeap->GpuAddr(YSpanIndicesTextureMemory), (u8*)YSpanIndices.data(), numSetupIndices*4*2);
 
-        memcpy(Gfx::DataHeap->CpuAddr<void>(RenderPolygonMemory[curSlice]), RenderPolygons, RenderNumPolygons*sizeof(RenderPolygon));
+        memcpy(Gfx::DataHeap->CpuAddr<void>(RenderPolygonMemory[curSlice]), RenderPolygons.data(), RenderNumPolygons*sizeof(RenderPolygon));
 
         // we haven't accessed image data yet, so we don't need to invalidate anything
         EmuCmdBuf.barrier(DkBarrier_Full, DkInvalidateFlags_Image|DkInvalidateFlags_Descriptors|DkInvalidateFlags_L2Cache);
@@ -1206,7 +1397,12 @@ void DekoRenderer::RenderFrame()
         {Gfx::DataHeap->GpuAddr(XSpanSetupMemory), XSpanSetupMemory.Size},
         {Gfx::DataHeap->GpuAddr(RenderPolygonMemory[curSlice]), RenderPolygonMemory[curSlice].Size},
         {gpuAddrBinResult, BinResultMemory.Size},
-        {Gfx::DataHeap->GpuAddr(TileMemory), TileMemory.Size},
+        {Gfx::DataHeap->GpuAddr(TileMemory), TileMemory.Size/6},
+        {Gfx::DataHeap->GpuAddr(TileMemory) + TileMemory.Size/6, TileMemory.Size/6},
+        {Gfx::DataHeap->GpuAddr(TileMemory) + TileMemory.Size/6*2, TileMemory.Size/6},
+        {Gfx::DataHeap->GpuAddr(TileMemory) + TileMemory.Size/6*3, TileMemory.Size/6},
+        {Gfx::DataHeap->GpuAddr(TileMemory) + TileMemory.Size/6*4, TileMemory.Size/6},
+        {Gfx::DataHeap->GpuAddr(TileMemory) + TileMemory.Size/6*5, TileMemory.Size/6},
         {Gfx::DataHeap->GpuAddr(FinalTileMemory), FinalTileMemory.Size}
     });
 
@@ -1265,7 +1461,8 @@ void DekoRenderer::RenderFrame()
     EmuCmdBuf.bindUniformBuffer(DkStage_Compute, 0, Gfx::DataHeap->GpuAddr(MetaUniformMemory), MetaUniformSize);
     EmuCmdBuf.pushConstants(gpuAddrMetaUniform, MetaUniformSize, 0, sizeof(MetaUniform), &meta);
 
-    EmuCmdBuf.bindShaders(DkStageFlag_Compute, {&ShaderClearCoarseBinMask});
+    const int shaderScale = ScaleFactor - 1;
+    EmuCmdBuf.bindShaders(DkStageFlag_Compute, {&ShaderClearCoarseBinMask[shaderScale]});
     EmuCmdBuf.dispatchCompute(TilesPerLine*TileLines/32, 1, 1);
 
     bool wbuffer = false;
@@ -1273,28 +1470,28 @@ void DekoRenderer::RenderFrame()
     {
         wbuffer = RenderPolygonRAM[0]->WBuffer;
 
-        EmuCmdBuf.bindShaders(DkStageFlag_Compute, {&ShaderClearIndirectWorkCount});
+        EmuCmdBuf.bindShaders(DkStageFlag_Compute, {&ShaderClearIndirectWorkCount[shaderScale]});
         EmuCmdBuf.dispatchCompute((numVariants+31)/32, 1, 1);
 
         // calculate x-spans
         EmuCmdBuf.bindImages(DkStage_Compute, 0, {dkMakeImageHandle(descriptorOffset_YSpanIndices)});
-        EmuCmdBuf.bindShaders(DkStageFlag_Compute, {&ShaderInterpXSpans[wbuffer]});
+        EmuCmdBuf.bindShaders(DkStageFlag_Compute, {&ShaderInterpXSpans[shaderScale][wbuffer]});
         EmuCmdBuf.dispatchCompute((numSetupIndices + 31) / 32, 1, 1);
         EmuCmdBuf.barrier(DkBarrier_Primitives, 0);
 
         // bin polygons
-        EmuCmdBuf.bindShaders(DkStageFlag_Compute, {&ShaderBinCombined});
-        EmuCmdBuf.dispatchCompute(((RenderNumPolygons + 31) / 32), 256/CoarseTileW, 192/CoarseTileH);
+        EmuCmdBuf.bindShaders(DkStageFlag_Compute, {&ShaderBinCombined[shaderScale]});
+        EmuCmdBuf.dispatchCompute(((RenderNumPolygons + 31) / 32), ScreenWidth/CoarseTileW, ScreenHeight/CoarseTileH);
         EmuCmdBuf.barrier(DkBarrier_Primitives, 0);
 
         // calculate list offsets
-        EmuCmdBuf.bindShaders(DkStageFlag_Compute, {&ShaderCalculateWorkListOffset});
+        EmuCmdBuf.bindShaders(DkStageFlag_Compute, {&ShaderCalculateWorkListOffset[shaderScale]});
         EmuCmdBuf.dispatchCompute((numVariants + 31) / 32, 1, 1);
         EmuCmdBuf.barrier(DkBarrier_Primitives, 0);
 
         // sort shader work
-        EmuCmdBuf.bindShaders(DkStageFlag_Compute, {&ShaderSortWork});
-        EmuCmdBuf.dispatchComputeIndirect(gpuAddrBinResult + offsetof(BinResult, SortWorkWorkCount));
+        EmuCmdBuf.bindShaders(DkStageFlag_Compute, {&ShaderSortWork[shaderScale]});
+        EmuCmdBuf.dispatchComputeIndirect(gpuAddrBinResult + SortWorkWorkCountOffset());
         EmuCmdBuf.barrier(DkBarrier_Primitives, 0);
 
         // rasterise
@@ -1303,23 +1500,23 @@ void DekoRenderer::RenderFrame()
 
             dk::Shader* shadersNoTexture[] =
             {
-                &ShaderRasteriseNoTexture[wbuffer],
-                &ShaderRasteriseNoTexture[wbuffer],
+                &ShaderRasteriseNoTexture[shaderScale][wbuffer],
+                &ShaderRasteriseNoTexture[shaderScale][wbuffer],
                 highLightMode
-                    ? &ShaderRasteriseNoTextureHighlight[wbuffer]
-                    : &ShaderRasteriseNoTextureToon[wbuffer],
-                &ShaderRasteriseNoTexture[wbuffer],
-                &ShaderRasteriseShadowMask[wbuffer]
+                    ? &ShaderRasteriseNoTextureHighlight[shaderScale][wbuffer]
+                    : &ShaderRasteriseNoTextureToon[shaderScale][wbuffer],
+                &ShaderRasteriseNoTexture[shaderScale][wbuffer],
+                &ShaderRasteriseShadowMask[shaderScale][wbuffer]
             };
             dk::Shader* shadersUseTexture[] =
             {
-                &ShaderRasteriseUseTextureModulate[wbuffer],
-                &ShaderRasteriseUseTextureDecal[wbuffer],
+                &ShaderRasteriseUseTextureModulate[shaderScale][wbuffer],
+                &ShaderRasteriseUseTextureDecal[shaderScale][wbuffer],
                 highLightMode
-                    ? &ShaderRasteriseUseTextureHighlight[wbuffer]
-                    : &ShaderRasteriseUseTextureToon[wbuffer],
-                &ShaderRasteriseUseTextureDecal[wbuffer],
-                &ShaderRasteriseShadowMask[wbuffer]
+                    ? &ShaderRasteriseUseTextureHighlight[shaderScale][wbuffer]
+                    : &ShaderRasteriseUseTextureToon[shaderScale][wbuffer],
+                &ShaderRasteriseUseTextureDecal[shaderScale][wbuffer],
+                &ShaderRasteriseShadowMask[shaderScale][wbuffer]
             };
 
             dk::Shader* prevShader = NULL;
@@ -1356,7 +1553,7 @@ void DekoRenderer::RenderFrame()
                 meta.CurVariant = i;
                 // not pretty, but alignment shouldn't matter as we only have 4 byte values
                 EmuCmdBuf.pushConstants(gpuAddrMetaUniform, MetaUniformSize, offsetof(MetaUniform, CurVariant), 4*3, &meta.CurVariant);
-                EmuCmdBuf.dispatchComputeIndirect(gpuAddrBinResult + offsetof(BinResult, VariantWorkCount) + i*4*4);
+                EmuCmdBuf.dispatchComputeIndirect(gpuAddrBinResult + VariantWorkCountOffset() + i*4*4);
             }
         }
         EmuCmdBuf.barrier(DkBarrier_Primitives, 0);
@@ -1367,11 +1564,14 @@ void DekoRenderer::RenderFrame()
     }
 
     // compose final image
-    EmuCmdBuf.bindShaders(DkStageFlag_Compute, {&ShaderDepthBlend[wbuffer]});
-    EmuCmdBuf.dispatchCompute(256/8, 192/8, 1);
+    EmuCmdBuf.bindShaders(DkStageFlag_Compute, {&ShaderDepthBlend[shaderScale][wbuffer]});
+    EmuCmdBuf.dispatchCompute(ScreenWidth/TileSize, ScreenHeight/TileSize, 1);
     EmuCmdBuf.barrier(DkBarrier_Primitives, 0);
 
-    EmuCmdBuf.bindImages(DkStage_Compute, 0, {dkMakeImageHandle(descriptorOffset_FinalFB)});
+    EmuCmdBuf.bindImages(DkStage_Compute, 0, {
+        dkMakeImageHandle(descriptorOffset_FinalFB),
+        dkMakeImageHandle(descriptorOffset_LowResFB)
+    });
     u32 finalPassShader = 0;
     if (RenderDispCnt & (1<<4))
         finalPassShader |= 0x4;
@@ -1379,8 +1579,8 @@ void DekoRenderer::RenderFrame()
         finalPassShader |= 0x2;
     if (RenderDispCnt & (1<<5))
         finalPassShader |= 0x1;
-    EmuCmdBuf.bindShaders(DkStageFlag_Compute, {&ShaderFinalPass[finalPassShader]});
-    EmuCmdBuf.dispatchCompute(256/32, 192, 1);
+    EmuCmdBuf.bindShaders(DkStageFlag_Compute, {&ShaderFinalPass[shaderScale][finalPassShader]});
+    EmuCmdBuf.dispatchCompute(ScreenWidth/32, ScreenHeight, 1);
     EmuCmdBuf.barrier(DkBarrier_Primitives, 0);
 
     DkCmdList cmdlist = CmdMem.End(EmuCmdBuf);

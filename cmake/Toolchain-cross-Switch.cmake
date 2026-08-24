@@ -88,3 +88,20 @@ function(compile_shader_instance stage relativepath newname defines)
         COMMAND ${UAM} --stage=${stage} --out ${CMAKE_BINARY_DIR}/romfs/shaders/${newname}.dksh ${CMAKE_BINARY_DIR}/generated_shaders/${newname}.glsl
         DEPENDS ${CMAKE_BINARY_DIR}/generated_shaders/${newname}.glsl)
 endfunction()
+
+function(compile_scaled_shader_instance stage relativepath newname defines scale)
+	file(MAKE_DIRECTORY ${CMAKE_BINARY_DIR}/generated_shaders)
+
+	string(REPLACE "," ";" define_list "${defines}")
+	foreach(var IN LISTS define_list)
+		set(${var} 1)
+	endforeach()
+	set(NDS_3D_SCALE ${scale})
+	set(output_name ${newname}_x${scale})
+	configure_file(${CMAKE_CURRENT_SOURCE_DIR}/${relativepath}.glsl ${CMAKE_BINARY_DIR}/generated_shaders/${output_name}.glsl)
+	list(APPEND shader_paths ${CMAKE_BINARY_DIR}/romfs/shaders/${output_name}.dksh)
+	set(shader_paths ${shader_paths} PARENT_SCOPE)
+	add_custom_command(OUTPUT ${CMAKE_BINARY_DIR}/romfs/shaders/${output_name}.dksh
+        COMMAND ${UAM} --stage=${stage} --out ${CMAKE_BINARY_DIR}/romfs/shaders/${output_name}.dksh ${CMAKE_BINARY_DIR}/generated_shaders/${output_name}.glsl
+        DEPENDS ${CMAKE_BINARY_DIR}/generated_shaders/${output_name}.glsl)
+endfunction()

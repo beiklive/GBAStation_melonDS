@@ -124,39 +124,50 @@ compile_shader_instance(frag ../../shaders/OBJ_fsh OBJ8bpp_fsh "OBJ8bpp")
 compile_shader_instance(frag ../../shaders/OBJ_fsh OBJBitmap_fsh "OBJBitmap")
 compile_shader_instance(frag ../../shaders/OBJ_fsh OBJWindow4bpp_fsh "OBJ4bpp;OBJWindow")
 compile_shader_instance(frag ../../shaders/OBJ_fsh OBJWindow8bpp_fsh "OBJ8bpp;OBJWindow")
-compile_shader_instance(comp ../../shaders/GPU3D_Comp InterpXSpansZBuffer "InterpSpans;ZBuffer")
-compile_shader_instance(comp ../../shaders/GPU3D_Comp InterpXSpansWBuffer "InterpSpans;WBuffer")
-compile_shader_instance(comp ../../shaders/GPU3D_Comp BinCombined "BinCombined")
-compile_shader_instance(comp ../../shaders/GPU3D_Comp DepthBlendWBuffer "DepthBlend;WBuffer")
-compile_shader_instance(comp ../../shaders/GPU3D_Comp DepthBlendZBuffer "DepthBlend;ZBuffer")
-compile_shader_instance(comp ../../shaders/GPU3D_Comp RasteriseNoTextureWBuffer "Rasterise;WBuffer;NoTexture")
-compile_shader_instance(comp ../../shaders/GPU3D_Comp RasteriseNoTextureWBufferToon "Rasterise;WBuffer;NoTexture;Toon")
-compile_shader_instance(comp ../../shaders/GPU3D_Comp RasteriseNoTextureWBufferHighlight "Rasterise;WBuffer;NoTexture;Highlight")
-compile_shader_instance(comp ../../shaders/GPU3D_Comp RasteriseUseTextureDecalWBuffer "Rasterise;WBuffer;UseTexture;Decal")
-compile_shader_instance(comp ../../shaders/GPU3D_Comp RasteriseUseTextureModulateWBuffer "Rasterise;WBuffer;UseTexture;Modulate")
-compile_shader_instance(comp ../../shaders/GPU3D_Comp RasteriseUseTextureToonWBuffer "Rasterise;WBuffer;UseTexture;Toon")
-compile_shader_instance(comp ../../shaders/GPU3D_Comp RasteriseUseTextureHighlightWBuffer "Rasterise;WBuffer;UseTexture;Highlight")
-compile_shader_instance(comp ../../shaders/GPU3D_Comp RasteriseShadowMaskWBuffer "Rasterise;WBuffer;ShadowMask")
-compile_shader_instance(comp ../../shaders/GPU3D_Comp RasteriseNoTextureZBuffer "Rasterise;ZBuffer;NoTexture")
-compile_shader_instance(comp ../../shaders/GPU3D_Comp RasteriseNoTextureZBufferToon "Rasterise;ZBuffer;NoTexture;Toon")
-compile_shader_instance(comp ../../shaders/GPU3D_Comp RasteriseNoTextureZBufferHighlight "Rasterise;ZBuffer;NoTexture;Highlight")
-compile_shader_instance(comp ../../shaders/GPU3D_Comp RasteriseUseTextureDecalZBuffer "Rasterise;ZBuffer;UseTexture;Decal")
-compile_shader_instance(comp ../../shaders/GPU3D_Comp RasteriseUseTextureModulateZBuffer "Rasterise;ZBuffer;UseTexture;Modulate")
-compile_shader_instance(comp ../../shaders/GPU3D_Comp RasteriseUseTextureToonZBuffer "Rasterise;ZBuffer;UseTexture;Toon")
-compile_shader_instance(comp ../../shaders/GPU3D_Comp RasteriseUseTextureHighlightZBuffer "Rasterise;ZBuffer;UseTexture;Highlight")
-compile_shader_instance(comp ../../shaders/GPU3D_Comp RasteriseShadowMaskZBuffer "Rasterise;ZBuffer;ShadowMask")
-compile_shader_instance(comp ../../shaders/GPU3D_Comp FinalPass "FinalPass")
-compile_shader_instance(comp ../../shaders/GPU3D_Comp FinalPassEdge "FinalPass;EdgeMarking")
-compile_shader_instance(comp ../../shaders/GPU3D_Comp FinalPassFog "FinalPass;Fog")
-compile_shader_instance(comp ../../shaders/GPU3D_Comp FinalPassEdgeFog "FinalPass;EdgeMarking;Fog")
-compile_shader_instance(comp ../../shaders/GPU3D_Comp FinalPassAA "FinalPass;AntiAliasing")
-compile_shader_instance(comp ../../shaders/GPU3D_Comp FinalPassEdgeAA "FinalPass;EdgeMarking;AntiAliasing")
-compile_shader_instance(comp ../../shaders/GPU3D_Comp FinalPassFogAA "FinalPass;Fog;AntiAliasing")
-compile_shader_instance(comp ../../shaders/GPU3D_Comp FinalPassEdgeFogAA "FinalPass;EdgeMarking;Fog;AntiAliasing")
-compile_shader_instance(comp ../../shaders/GPU3D_Comp ClearCoarseBinMask "ClearCoarseBinMask")
-compile_shader_instance(comp ../../shaders/GPU3D_Comp ClearIndirectWorkCount "ClearIndirectWorkCount")
-compile_shader_instance(comp ../../shaders/GPU3D_Comp CalculateWorkOffsets "CalculateWorkOffsets")
-compile_shader_instance(comp ../../shaders/GPU3D_Comp SortWork "SortWork")
+set(GPU3D_SHADER_INSTANCES
+    "InterpXSpansZBuffer|InterpSpans,ZBuffer"
+    "InterpXSpansWBuffer|InterpSpans,WBuffer"
+    "BinCombined|BinCombined"
+    "DepthBlendWBuffer|DepthBlend,WBuffer"
+    "DepthBlendZBuffer|DepthBlend,ZBuffer"
+    "RasteriseNoTextureWBuffer|Rasterise,WBuffer,NoTexture"
+    "RasteriseNoTextureWBufferToon|Rasterise,WBuffer,NoTexture,Toon"
+    "RasteriseNoTextureWBufferHighlight|Rasterise,WBuffer,NoTexture,Highlight"
+    "RasteriseUseTextureDecalWBuffer|Rasterise,WBuffer,UseTexture,Decal"
+    "RasteriseUseTextureModulateWBuffer|Rasterise,WBuffer,UseTexture,Modulate"
+    "RasteriseUseTextureToonWBuffer|Rasterise,WBuffer,UseTexture,Toon"
+    "RasteriseUseTextureHighlightWBuffer|Rasterise,WBuffer,UseTexture,Highlight"
+    "RasteriseShadowMaskWBuffer|Rasterise,WBuffer,ShadowMask"
+    "RasteriseNoTextureZBuffer|Rasterise,ZBuffer,NoTexture"
+    "RasteriseNoTextureZBufferToon|Rasterise,ZBuffer,NoTexture,Toon"
+    "RasteriseNoTextureZBufferHighlight|Rasterise,ZBuffer,NoTexture,Highlight"
+    "RasteriseUseTextureDecalZBuffer|Rasterise,ZBuffer,UseTexture,Decal"
+    "RasteriseUseTextureModulateZBuffer|Rasterise,ZBuffer,UseTexture,Modulate"
+    "RasteriseUseTextureToonZBuffer|Rasterise,ZBuffer,UseTexture,Toon"
+    "RasteriseUseTextureHighlightZBuffer|Rasterise,ZBuffer,UseTexture,Highlight"
+    "RasteriseShadowMaskZBuffer|Rasterise,ZBuffer,ShadowMask"
+    "FinalPass|FinalPass"
+    "FinalPassEdge|FinalPass,EdgeMarking"
+    "FinalPassFog|FinalPass,Fog"
+    "FinalPassEdgeFog|FinalPass,EdgeMarking,Fog"
+    "FinalPassAA|FinalPass,AntiAliasing"
+    "FinalPassEdgeAA|FinalPass,EdgeMarking,AntiAliasing"
+    "FinalPassFogAA|FinalPass,Fog,AntiAliasing"
+    "FinalPassEdgeFogAA|FinalPass,EdgeMarking,Fog,AntiAliasing"
+    "ClearCoarseBinMask|ClearCoarseBinMask"
+    "ClearIndirectWorkCount|ClearIndirectWorkCount"
+    "CalculateWorkOffsets|CalculateWorkOffsets"
+    "SortWork|SortWork"
+)
+foreach(scale RANGE 1 4)
+    foreach(instance IN LISTS GPU3D_SHADER_INSTANCES)
+        string(REPLACE "|" ";" parts "${instance}")
+        list(GET parts 0 output_name)
+        list(REMOVE_AT parts 0)
+        string(REPLACE "," ";" defines "${parts}")
+        compile_scaled_shader_instance(comp ../../shaders/GPU3D_Comp ${output_name} "${defines}" ${scale})
+    endforeach()
+endforeach()
 
 message("${shader_paths}")
 add_custom_target(melonDS.nro ALL
@@ -164,3 +175,5 @@ add_custom_target(melonDS.nro ALL
     DEPENDS melonDS.elf
     ${CMAKE_BINARY_DIR}/control.nacp
     "${shader_paths}")
+
+add_subdirectory(nds_stub)

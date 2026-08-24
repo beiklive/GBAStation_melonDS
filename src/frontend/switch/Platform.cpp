@@ -5,6 +5,9 @@
 #include "../../Platform.h"
 
 #include <switch.h>
+#if defined(__SWITCH__) && defined(OGLRENDERER_ENABLED)
+#include <EGL/egl.h>
+#endif
 
 namespace Platform
 {
@@ -172,7 +175,11 @@ bool Mutex_TryLock(Mutex* mutex)
 
 void* GL_GetProcAddress(const char* proc)
 {
+#if defined(__SWITCH__) && defined(OGLRENDERER_ENABLED)
+    return reinterpret_cast<void*>(eglGetProcAddress(proc));
+#else
     return NULL;
+#endif
 }
 
 bool MP_Init()

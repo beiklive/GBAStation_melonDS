@@ -31,7 +31,6 @@ std::vector<Entry> CurrentEntries;
 std::string CurrentPath;
 std::string SearchText;
 int CurrentSelection = -1;
-bool CurrentFileListingMode = true;  // true = internal metadata; false = original filenames
 
 SwkbdConfig SearchKeyboard;
 
@@ -243,7 +242,7 @@ void DoGui(BoxGui::Frame& parent)
         BoxGui::Skewer skewer{entryFrame, entryFrame.Area.Size.Y/2.f, BoxGui::direction_Horizontal};
         skewer.AlignLeft(20.f);
 
-        if (!entry.IsDirectory && entry.ROMDBEntry != -1 && CurrentFileListingMode)
+        if (!entry.IsDirectory && entry.ROMDBEntry != -1)
         {
             ROMMetaDatabase::ROMMeta& meta = ROMMetaDatabase::Database[entry.ROMDBEntry];
             if (meta.HasIcon)
@@ -303,12 +302,6 @@ void DoGui(BoxGui::Frame& parent)
                 BoxGui::ForceSelecton(BoxGui::MakeUniqueName(FileBrowserPrefix, newSelection), false);
             }
         }
-    }
-    
-    
-    KeyExplanation::Explain(KeyExplanation::button_Plus, "Show filenames");
-    if (BoxGui::DetailsPressed()) {
-        CurrentFileListingMode = !CurrentFileListingMode;  // toggle
     }
 
     if (CurrentSelection != -1)

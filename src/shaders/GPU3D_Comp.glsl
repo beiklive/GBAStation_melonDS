@@ -17,6 +17,8 @@
 #cmakedefine ZBuffer
 #cmakedefine WBuffer
 
+#define NDS_3D_SCALE @NDS_3D_SCALE@
+
 // for Rasterise
 #cmakedefine NoTexture
 #cmakedefine UseTexture
@@ -125,9 +127,11 @@ const int CoarseTileCountY = 4;
 const int CoarseTileW = CoarseTileCountX * TileSize;
 const int CoarseTileH = CoarseTileCountY * TileSize;
 
-const int FramebufferStride = 256*192;
-const int TilesPerLine = 256/TileSize;
-const int TileLines = 192/TileSize;
+const int ScreenWidth = 256 * NDS_3D_SCALE;
+const int ScreenHeight = 192 * NDS_3D_SCALE;
+const int FramebufferStride = ScreenWidth*ScreenHeight;
+const int TilesPerLine = ScreenWidth/TileSize;
+const int TileLines = ScreenHeight/TileSize;
 
 const int BinStride = 2048/32;
 const int CoarseBinStride = BinStride/32;
@@ -151,6 +155,9 @@ buffer BinResultBuffer
 };
 
 #if defined(Rasterise) || defined(DepthBlend)
+const int TilePixelCount = MaxWorkTiles*TileSize*TileSize;
+const int TilePlaneHalf = TilePixelCount/2;
+
 layout (std430, binding = 4)
 #ifdef Rasterise
 writeonly
@@ -158,15 +165,68 @@ writeonly
 #ifdef DepthBlend
 readonly
 #endif
-buffer TilesBuffer
+buffer ColorTilesLowBuffer
 {
-    uint ColorTiles[MaxWorkTiles*TileSize*TileSize];
-    uint DepthTiles[MaxWorkTiles*TileSize*TileSize];
-    uint AttrTiles[MaxWorkTiles*TileSize*TileSize];
+    uint ColorTilesLow[TilePlaneHalf];
+};
+layout (std430, binding = 5)
+#ifdef Rasterise
+writeonly
+#endif
+#ifdef DepthBlend
+readonly
+#endif
+buffer ColorTilesHighBuffer
+{
+    uint ColorTilesHigh[TilePlaneHalf];
+};
+layout (std430, binding = 6)
+#ifdef Rasterise
+writeonly
+#endif
+#ifdef DepthBlend
+readonly
+#endif
+buffer DepthTilesLowBuffer
+{
+    uint DepthTilesLow[TilePlaneHalf];
+};
+layout (std430, binding = 7)
+#ifdef Rasterise
+writeonly
+#endif
+#ifdef DepthBlend
+readonly
+#endif
+buffer DepthTilesHighBuffer
+{
+    uint DepthTilesHigh[TilePlaneHalf];
+};
+layout (std430, binding = 8)
+#ifdef Rasterise
+writeonly
+#endif
+#ifdef DepthBlend
+readonly
+#endif
+buffer AttrTilesLowBuffer
+{
+    uint AttrTilesLow[TilePlaneHalf];
+};
+layout (std430, binding = 9)
+#ifdef Rasterise
+writeonly
+#endif
+#ifdef DepthBlend
+readonly
+#endif
+buffer AttrTilesHighBuffer
+{
+    uint AttrTilesHigh[TilePlaneHalf];
 };
 #endif
 
-layout (std430, binding = 5)
+layout (std430, binding = 10)
 #ifdef DepthBlend
 writeonly
 #endif
@@ -175,10 +235,42 @@ readonly
 #endif
 buffer RasterResult
 {
-    uint ColorResult[256*192*2];
-    uint DepthResult[256*192*2];
-    uint AttrResult[256*192*2];
+    uint ColorResult[ScreenWidth*ScreenHeight*2];
+    uint DepthResult[ScreenWidth*ScreenHeight*2];
+    uint AttrResult[ScreenWidth*ScreenHeight*2];
 };
+
+#ifdef Rasterise
+void StoreColorTile(int index, uint value)
+{
+    if (index < TilePlaneHalf) ColorTilesLow[index] = value;
+    else ColorTilesHigh[index-TilePlaneHalf] = value;
+}
+void StoreDepthTile(int index, uint value)
+{
+    if (index < TilePlaneHalf) DepthTilesLow[index] = value;
+    else DepthTilesHigh[index-TilePlaneHalf] = value;
+}
+void StoreAttrTile(int index, uint value)
+{
+    if (index < TilePlaneHalf) AttrTilesLow[index] = value;
+    else AttrTilesHigh[index-TilePlaneHalf] = value;
+}
+#endif
+#ifdef DepthBlend
+uint LoadColorTile(uint index)
+{
+    return index < uint(TilePlaneHalf) ? ColorTilesLow[index] : ColorTilesHigh[index-uint(TilePlaneHalf)];
+}
+uint LoadDepthTile(uint index)
+{
+    return index < uint(TilePlaneHalf) ? DepthTilesLow[index] : DepthTilesHigh[index-uint(TilePlaneHalf)];
+}
+uint LoadAttrTile(uint index)
+{
+    return index < uint(TilePlaneHalf) ? AttrTilesLow[index] : AttrTilesHigh[index-uint(TilePlaneHalf)];
+}
+#endif
 
 layout (std140, binding = 0) uniform MetaUniform
 {
@@ -219,7 +311,7 @@ const uint startTable[256] = uint[256](
 157, 156, 154, 153, 152, 151, 149, 148, 147, 146, 144, 143, 142, 141, 139, 138, 137, 136, 135, 134, 132, 131, 130, 129, 128, 127, 126, 125, 123, 122, 121, 120, 119, 118, 117, 116, 115, 114, 113, 112, 111, 110, 109, 108, 107, 106, 105, 104, 103, 102, 101, 100, 99, 98, 97, 96, 95, 94, 93, 92, 91, 90, 89, 88, 88, 87, 86, 85, 84, 83, 82, 81, 80, 80, 79, 78, 77, 76, 75, 74, 74, 73, 72, 71, 70, 70, 69, 68, 67, 66, 66, 65, 64, 63, 62, 62, 61, 60, 59, 59, 58, 57, 56, 56, 55, 54, 53, 53, 52, 51, 50, 50, 49, 48, 48, 47, 46, 46, 45, 44, 43, 43, 42, 41, 41, 40, 39, 39, 38, 37, 37, 36, 35, 35, 34, 33, 33, 32, 32, 31, 30, 30, 29, 28, 28, 27, 27, 26, 25, 25, 24, 24, 23, 22, 22, 21, 21, 20, 19, 19, 18, 18, 17, 17, 16, 15, 15, 14, 14, 13, 13, 12, 12, 11, 10, 10, 9, 9, 8, 8, 7, 7, 6, 6, 5, 5, 4, 4, 3, 3, 2, 2, 1, 1, 0, 0
 );
 
-uint Div(uint x, uint y)
+uint Div(uint x, uint y, out uint remainder)
 {
     // https://www.microsoft.com/en-us/research/publication/software-integer-division/
     uint k = 31 - findMSB(y);
@@ -232,19 +324,59 @@ uint Div(uint x, uint y)
     z += Umulh(z, my * z);
 
     uint q = Umulh(x, z);
-    uint r = x - y * q;
-    if(r >= y)
+    remainder = x - y * q;
+    if(remainder >= y)
     {
-        r = r - y;
+        remainder = remainder - y;
         q = q + 1;
-        if(r >= y)
+        if(remainder >= y)
         {
-            r = r - y;
+            remainder = remainder - y;
             q = q + 1;
         }
     }
 
     return q;
+}
+
+uint Div(uint x, uint y)
+{
+    uint remainder;
+    return Div(x, y, remainder);
+}
+
+uint Div64_32_32(uint numHi, uint numLo, uint den)
+{
+    // Divide a 64-bit numerator (numHi:numLo) by a 32-bit denominator without
+    // overflowing the 32-bit integer operations available in the shader.
+    const uint base = 1U << 16;
+    uint shift = 31U - uint(findMSB(den));
+    den <<= shift;
+    numHi <<= shift;
+    numHi |= (numLo >> (-shift & 31U)) & uint(-int(shift) >> 31);
+    numLo <<= shift;
+
+    uint num1 = numLo >> 16;
+    uint num0 = numLo & 0xFFFFU;
+    uint den1 = den >> 16;
+    uint den0 = den & 0xFFFFU;
+
+    uint remainder;
+    uint estimate = Div(numHi, den1, remainder);
+    uint product = estimate * den0;
+    uint partial = remainder * base + num1;
+    if (product > partial)
+        estimate -= (product - partial > den) ? 2U : 1U;
+    uint quotient1 = estimate & 0xFFFFU;
+
+    uint trueRemainder = numHi * base + num1 - quotient1 * den;
+    estimate = Div(trueRemainder, den1, remainder);
+    product = estimate * den0;
+    partial = remainder * base + num0;
+    if (product > partial)
+        estimate -= (product - partial > den) ? 2U : 1U;
+
+    return bitfieldInsert(estimate, quotient1, 16, 16);
 }
 
 #ifdef InterpSpans
@@ -255,8 +387,11 @@ const int Shift = 8;
 
 int CalcYFactorY(YSpanSetup span, int i)
 {
-    int num = abs((i) * span.W0n) << Shift;
-    int den = abs(((i) * span.W0d) + (((span.I1 - span.I0 - i) * span.W1d)));
+    uint numLo = uint(abs(i)) * uint(span.W0n);
+    uint numHi = numLo >> (32U - uint(Shift));
+    numLo <<= uint(Shift);
+    uint den = uint(abs(i)) * uint(span.W0d)
+             + uint(abs(span.I1 - span.I0 - i)) * uint(span.W1d);
 
     if (den == 0)
     {
@@ -264,10 +399,7 @@ int CalcYFactorY(YSpanSetup span, int i)
     }
     else
     {
-        int q = int(Div(num, den));
-        //if ((num < 0) != (den < 0))
-        //    return -q;
-        return q;
+        return int(Div64_32_32(numHi, numLo, den));
     }
 }
 
@@ -277,13 +409,15 @@ int CalcYFactorX(XSpanSetup span, int x)
 
     if (span.X0 != span.X1)
     {
-        uint num = (uint(x) * span.W0) << Shift;
+        uint numLo = uint(x) * uint(span.W0);
+        uint numHi = numLo >> (32U - uint(Shift));
+        numLo <<= uint(Shift);
         uint den = (uint(x) * span.W0) + (uint(span.X1 - span.X0 - x) * span.W1);
 
         if (den == 0)
             return 0;
         else
-            return int(Div(num, den));
+            return int(Div64_32_32(numHi, numLo, den));
     }
     else
     {
@@ -1044,17 +1178,17 @@ void main()
             {
                 color = r | (g << 8) | (b << 16) | (a << 24);
 
-                DepthTiles[tileOffset] = z;
-                AttrTiles[tileOffset] = attr;
+                StoreDepthTile(tileOffset, z);
+                StoreAttrTile(tileOffset, attr);
             }
 #else
             color = 0xFFFFFFFF; // doesn't really matter as long as it's not 0
-            DepthTiles[tileOffset] = z;
+            StoreDepthTile(tileOffset, z);
 #endif
         }
     }
 
-    ColorTiles[tileOffset] = color;
+    StoreColorTile(tileOffset, color);
 }
 
 #endif
@@ -1118,7 +1252,7 @@ void ProcessCoarseMask(int linearTile, uint coarseMask, uint coarseOffset,
             fineMask &= ~(1U << fineIdx);
 
             uint pixelindex = tileInnerOffset + workIdx * TileSize * TileSize;
-            uint tileColor = ColorTiles[pixelindex];
+            uint tileColor = LoadColorTile(pixelindex);
             workIdx++;
 
             uint polygonIdx = fineIdx + (coarseBit + coarseOffset) * 32;
@@ -1133,8 +1267,8 @@ void ProcessCoarseMask(int linearTile, uint coarseMask, uint coarseOffset,
 
                 bool equalDepthTest = (polygonAttr & (1U << 14)) != 0U;
 
-                uint tileDepth = DepthTiles[pixelindex];
-                uint tileAttr = AttrTiles[pixelindex];
+                uint tileDepth = LoadDepthTile(pixelindex);
+                uint tileAttr = LoadAttrTile(pixelindex);
 
                 uint dstattr = attr.x;
 
@@ -1271,7 +1405,7 @@ void main()
     ProcessCoarseMask(linearTile, coarseMaskLo, 0, color, depth, attr, stencil, prevIsShadowMask);
     ProcessCoarseMask(linearTile, coarseMaskHi, BinStride/2, color, depth, attr, stencil, prevIsShadowMask);
 
-    int resultOffset = int(gl_GlobalInvocationID.x) + int(gl_GlobalInvocationID.y) * 256;
+    int resultOffset = int(gl_GlobalInvocationID.x) + int(gl_GlobalInvocationID.y) * ScreenWidth;
     ColorResult[resultOffset] = color.x;
     ColorResult[resultOffset+FramebufferStride] = color.y;
     DepthResult[resultOffset] = depth.x;
@@ -1287,6 +1421,7 @@ void main()
 layout (local_size_x = 32) in;
 
 layout (binding = 0, r32ui) writeonly uniform uimage2D FinalFB; 
+layout (binding = 1, r32ui) writeonly uniform uimage2D LowResFB;
 
 uint BlendFog(uint color, uint depth)
 {
@@ -1333,13 +1468,13 @@ uint BlendFog(uint color, uint depth)
 
 void main()
 {
-    int srcX = (int(gl_GlobalInvocationID.x) + XScroll) & 0x1FF;
-    int resultOffset = int(srcX) + int(gl_GlobalInvocationID.y) * 256;
+    int srcX = (int(gl_GlobalInvocationID.x) + XScroll * NDS_3D_SCALE) % (512 * NDS_3D_SCALE);
+    int resultOffset = int(srcX) + int(gl_GlobalInvocationID.y) * ScreenWidth;
 
     uvec2 color = uvec2(0);
     uvec2 depth = uvec2(0);
     uvec2 attr = uvec2(0);
-    if (srcX < 256)
+    if (srcX < ScreenWidth)
     {
         color = uvec2(ColorResult[resultOffset], ColorResult[resultOffset+FramebufferStride]);
         depth = uvec2(DepthResult[resultOffset], DepthResult[resultOffset+FramebufferStride]);
@@ -1357,20 +1492,20 @@ void main()
             otherAttr.x = AttrResult[resultOffset-1];
             otherDepth.x = DepthResult[resultOffset-1];
         }
-        if (srcX < 255U)
+        if (srcX < ScreenWidth-1)
         {
             otherAttr.y = AttrResult[resultOffset+1];
             otherDepth.y = DepthResult[resultOffset+1];
         }
         if (gl_GlobalInvocationID.y > 0U)
         {
-            otherAttr.z = AttrResult[resultOffset-256];
-            otherDepth.z = DepthResult[resultOffset-256];
+            otherAttr.z = AttrResult[resultOffset-ScreenWidth];
+            otherDepth.z = DepthResult[resultOffset-ScreenWidth];
         }
-        if (gl_GlobalInvocationID.y < 191U)
+        if (gl_GlobalInvocationID.y < ScreenHeight-1)
         {
-            otherAttr.w = AttrResult[resultOffset+256];
-            otherDepth.w = DepthResult[resultOffset+256];
+            otherAttr.w = AttrResult[resultOffset+ScreenWidth];
+            otherDepth.w = DepthResult[resultOffset+ScreenWidth];
         }
 
         uint polyId = bitfieldExtract(attr.x, 24, 5);
@@ -1449,6 +1584,9 @@ void main()
         //color.x = 0x1F00001FU | 0x40000000U;
 
     imageStore(FinalFB, ivec2(gl_GlobalInvocationID.xy), uvec4(color.x, 0, 0, 0));
+    ivec2 highresPosition = ivec2(gl_GlobalInvocationID.xy);
+    if (all(equal(highresPosition % NDS_3D_SCALE, ivec2(0))))
+        imageStore(LowResFB, highresPosition / NDS_3D_SCALE, uvec4(color.x, 0, 0, 0));
 }
 
 #endif

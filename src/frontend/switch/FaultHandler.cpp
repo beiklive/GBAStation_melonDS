@@ -6,6 +6,14 @@ extern char __rodata_start;
 
 void HandleFault(u64 pc, u64 lr, u64 fp, u64 faultAddr, u32 desc)
 {
+    FILE* log = fopen("/switch/melonds/melonds_gl.log", "ab");
+    if (!log) log = fopen("melonds_gl.log", "ab");
+    if (log)
+    {
+        fprintf(log, "FAULT pc=%p lr=%p fp=%p addr=%p desc=%u\n",
+            (void*)pc, (void*)lr, (void*)fp, (void*)faultAddr, desc);
+        fclose(log);
+    }
     if (pc >= (u64)&__start__ && pc < (u64)&__rodata_start)
     {
         printf("unintentional fault in .text at %p (type %d) (trying to access %p?)\n", 

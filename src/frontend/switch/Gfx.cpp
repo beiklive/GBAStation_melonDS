@@ -11,6 +11,7 @@
 #include <array>
 #include <unordered_map>
 #include <algorithm>
+#include <cmath>
 
 #include <stdio.h>
 
@@ -22,8 +23,28 @@
 
 #include "CmdMemRing.h"
 
+extern "C" void GBAStationNDSStubLogLine(const char* line) __attribute__((weak));
+
 namespace Gfx
 {
+
+namespace
+{
+
+void GfxLog(const char* format, ...)
+{
+    char line[768] = {};
+    va_list args;
+    va_start(args, format);
+    vsnprintf(line, sizeof(line), format, args);
+    va_end(args);
+    if (GBAStationNDSStubLogLine)
+        GBAStationNDSStubLogLine(line);
+    else
+        printf("%s\n", line);
+}
+
+}
 
 dk::Device Device;
 dk::Queue PresentQueue, EmuQueue;
@@ -43,6 +64,13 @@ struct Transformation
     float Projection[4*4];
     float InvHeight;
     float Pad[3];
+};
+
+struct NdsShaderUniform
+{
+    float Param0[4];
+    float Param1[4];
+    float Runtime[4];
 };
 
 int SwapchainSlot = 0;
@@ -71,6 +99,9 @@ u32 CurClientVertex = 0;
 u32 CurClientIndex = 0;
 
 u32 CurSampler = 0;
+ShaderMode CurShaderMode = shaderMode_Default;
+std::array<float, 8> CurNdsShaderParams {2.4f, 0.05f, 0.65f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f};
+float CurNdsSourceScale = 1.0f;
 
 enum
 {
@@ -81,24 +112,56 @@ enum
     drawCallDirty_WaitFence = 1 << 4,
     drawCallDirty_SignalFence = 1 << 5,
 };
+
+enum class DrawCallKind
+{
+    Draw,
+    WaitFence,
+    SignalFence,
+    NdsMultiPass,
+};
+
+struct NdsMultiPassDraw
+{
+    u32 SourceTexture = 0;
+    u32 TempTextureA = 0;
+    u32 TempTextureB = 0;
+    u32 TempWidth = 0;
+    u32 TempHeight = 0;
+    u32 InitialIndexOffset = 0;
+    u32 IntermediateIndexOffset = 0;
+    u32 FinalIndexOffset = 0;
+    int PassCount = 0;
+    float SourceScale = 1.0f;
+    std::array<NdsFilterPass, 4> Passes {};
+    DkScissor Scissor {};
+};
+
 struct DrawCall
 {
+    DrawCallKind Kind;
     u32 Dirty;
     u32 TextureIdx, Sampler;
+    ShaderMode Shader;
+    u32 IndexOffset;
     u32 Count;
     DkScissor Scissor;
     dk::Fence* Fence;
+    NdsMultiPassDraw MultiPass;
+    float NdsSourceScale = 1.0f;
 };
 std::vector<DrawCall> DrawCalls;
 
 GpuMemHeap::Allocation VertexData[2];
 GpuMemHeap::Allocation IndexData[2];
 GpuMemHeap::Allocation UniformBuffer;
+GpuMemHeap::Allocation NdsShaderUniformBuffer;
+bool NdsExtensionsInitialized = false;
 
 GpuMemHeap::Allocation TextureStagingBuffer[2];
 u32 TextureStagingBufferOffset;
 
-dk::Shader VertexShader, FragmentShader;
+dk::Shader VertexShader, FragmentShaders[shaderMode_Count];
 
 NWindow* Window;
 
@@ -152,14 +215,26 @@ struct PendingTextureUpload
     u32 TextureIdx;
     u32 X, Y, Width, Height;
     u32 DataStrideBytes;
+    u32 StagingSlot;
+    u32 StagingOffsetBytes;
 };
 
 Registry<Texture> Textures;
 
 std::vector<u32> UsedTextures;
 std::vector<PendingTextureUpload> TextureUploadsPending;
+bool FrameActive = false;
 
-u32 TextureCreate(u32 width, u32 height, DkImageFormat format)
+void UseTexture(u32 textureIdx)
+{
+    if (Textures[textureIdx].ImageDescriptorIdx == -1)
+    {
+        Textures[textureIdx].ImageDescriptorIdx = UsedTextures.size();
+        UsedTextures.push_back(textureIdx);
+    }
+}
+
+u32 TextureCreateWithFlags(u32 width, u32 height, DkImageFormat format, int flags)
 {
     u32 idx = Textures.Alloc();
 
@@ -171,6 +246,7 @@ u32 TextureCreate(u32 width, u32 height, DkImageFormat format)
 
     dk::ImageLayout layout;
     dk::ImageLayoutMaker{Device}
+        .setFlags(flags)
         .setFormat(format)
         .setDimensions(width, height)
         .initialize(layout);
@@ -178,11 +254,22 @@ u32 TextureCreate(u32 width, u32 height, DkImageFormat format)
     texture.ComponentSwizzle[1] = DkImageSwizzle_Green;
     texture.ComponentSwizzle[2] = DkImageSwizzle_Blue;
     texture.ComponentSwizzle[3] = DkImageSwizzle_Alpha;
+    texture.ImageDescriptorIdx = -1;
     texture.GpuMem = TextureHeap->Alloc(layout.getSize(), layout.getAlignment());
 
     texture.Image.initialize(layout, TextureHeap->MemBlock, texture.GpuMem.Offset);
 
     return idx;
+}
+
+u32 TextureCreate(u32 width, u32 height, DkImageFormat format)
+{
+    return TextureCreateWithFlags(width, height, format, 0);
+}
+
+u32 TextureCreateRenderTarget(u32 width, u32 height, DkImageFormat format)
+{
+    return TextureCreateWithFlags(width, height, format, DkImageFlags_UsageRender);
 }
 
 u32 TextureCreateExternal(u32 width, u32 height, dk::Image& image)
@@ -197,6 +284,7 @@ u32 TextureCreateExternal(u32 width, u32 height, dk::Image& image)
     texture.ComponentSwizzle[1] = DkImageSwizzle_Green;
     texture.ComponentSwizzle[2] = DkImageSwizzle_Blue;
     texture.ComponentSwizzle[3] = DkImageSwizzle_Alpha;
+    texture.ImageDescriptorIdx = -1;
 
     return idx;
 }
@@ -204,6 +292,15 @@ u32 TextureCreateExternal(u32 width, u32 height, dk::Image& image)
 void TextureDelete(u32 idx)
 {
     Texture& texture = Textures[idx];
+
+    TextureUploadsPending.erase(
+        std::remove_if(TextureUploadsPending.begin(),
+                       TextureUploadsPending.end(),
+                       [idx](const PendingTextureUpload& upload) {
+                           return upload.TextureIdx == idx;
+                       }),
+        TextureUploadsPending.end());
+    texture.ImageDescriptorIdx = -1;
 
     if (!texture.External)
         TextureHeap->Free(texture.GpuMem);
@@ -213,13 +310,21 @@ void TextureDelete(u32 idx)
 
 void TextureUpload(u32 index, u32 x, u32 y, u32 width, u32 height, void* data, u32 dataStride)
 {
-    assert(TextureStagingBufferOffset + dataStride * height <= TextureStagingBuffer[0].Size);
+    if (!FrameActive)
+        PresentQueue.waitIdle();
+
+    const u32 uploadSize = dataStride * height;
+    const u32 alignedUploadSize = (uploadSize + DK_IMAGE_LINEAR_STRIDE_ALIGNMENT - 1) &
+                                  ~(DK_IMAGE_LINEAR_STRIDE_ALIGNMENT - 1);
+    assert(TextureStagingBufferOffset + alignedUploadSize <= TextureStagingBuffer[0].Size);
     assert(!Textures[index].External);
 
-    TextureUploadsPending.push_back({index, x, y, width, height, dataStride});
+    const u32 stagingSlot = static_cast<u32>(SwapchainSlot);
+    const u32 stagingOffset = TextureStagingBufferOffset;
+    TextureUploadsPending.push_back({index, x, y, width, height, dataStride, stagingSlot, stagingOffset});
     u8* stagingBufferCpuAddr = DataHeap->CpuAddr<u8>(TextureStagingBuffer[SwapchainSlot]) + TextureStagingBufferOffset;
-    memcpy(stagingBufferCpuAddr, data, dataStride * height);
-    TextureStagingBufferOffset += dataStride * height;
+    memcpy(stagingBufferCpuAddr, data, uploadSize);
+    TextureStagingBufferOffset += alignedUploadSize;
 }
 
 void TextureSetSwizzle(u32 idx, DkImageSwizzle red, DkImageSwizzle green, DkImageSwizzle blue, DkImageSwizzle alpha)
@@ -464,11 +569,24 @@ PackedGlyph& FontGetGlyph(u32 idx, u32 codepoint, float scale)
 
 u32 SystemFontStandard;
 u32 SystemFontNintendoExt;
+u32 SystemFontChinese;
 
 u8* SystemFontStandardData;
 u8* SystemFontNintendoExtData;
+u8* SystemFontChineseData;
 
 u32 WhiteTexture;
+
+u8* CopySharedFont(PlSharedFontType type)
+{
+    PlFontData font {};
+    if (R_FAILED(plGetSharedFontByType(&font, type)) || !font.address || font.size == 0)
+        return nullptr;
+
+    u8* data = new u8[font.size];
+    memcpy(data, font.address, font.size);
+    return data;
+}
 
 struct DkshHeader
 {
@@ -480,41 +598,143 @@ struct DkshHeader
     uint32_t num_programs;
 };
 
-void LoadShader(const char* path, dk::Shader& out)
+bool LoadShader(const char* path, dk::Shader& out)
 {
+    GfxLog("GBAStationNDSStub: Gfx LoadShader begin path=%s", path ? path : "(null)");
     FILE* f = fopen(path, "rb");
     if (f)
     {
         DkshHeader header;
-        fread(&header, sizeof(DkshHeader), 1, f);
+        size_t read = fread(&header, sizeof(DkshHeader), 1, f);
+        if (!read)
+        {
+            GfxLog("GBAStationNDSStub: Gfx LoadShader header read failed path=%s", path);
+            printf("couldn't read shader header %s\n", path);
+            fclose(f);
+            return false;
+        }
+
+        GfxLog("GBAStationNDSStub: Gfx LoadShader header path=%s control=%u code=%u programs=%u",
+               path, header.control_sz, header.code_sz, header.num_programs);
 
         rewind(f);
         u8* ctrlmem = new u8[header.control_sz];
-        size_t read = fread(ctrlmem, header.control_sz, 1, f);
-        assert(read);
+        read = fread(ctrlmem, header.control_sz, 1, f);
+        if (!read)
+        {
+            GfxLog("GBAStationNDSStub: Gfx LoadShader control read failed path=%s", path);
+            printf("couldn't read shader control %s\n", path);
+            delete[] ctrlmem;
+            fclose(f);
+            return false;
+        }
 
+        GfxLog("GBAStationNDSStub: Gfx LoadShader code alloc begin path=%s bytes=%u", path, header.code_sz);
         GpuMemHeap::Allocation data = ShaderCodeHeap->Alloc(header.code_sz, DK_SHADER_CODE_ALIGNMENT);
+        GfxLog("GBAStationNDSStub: Gfx LoadShader code alloc ok path=%s offset=%u size=%u",
+               path, data.Offset, data.Size);
         read = fread(ShaderCodeHeap->CpuAddr<void>(data), header.code_sz, 1, f);
-        assert(read);
+        if (!read)
+        {
+            GfxLog("GBAStationNDSStub: Gfx LoadShader code read failed path=%s", path);
+            printf("couldn't read shader code %s\n", path);
+            delete[] ctrlmem;
+            fclose(f);
+            return false;
+        }
 
         dk::ShaderMaker{ShaderCodeHeap->MemBlock, data.Offset}
             .setControl(ctrlmem)
             .setProgramId(0)
             .initialize(out);
 
+        GfxLog("GBAStationNDSStub: Gfx LoadShader ok path=%s", path);
+
         delete[] ctrlmem;
         fclose(f);
+        return true;
     }
     else
     {
+        GfxLog("GBAStationNDSStub: Gfx LoadShader open failed path=%s", path ? path : "(null)");
         printf("couldn't open shader file %s\n", path);
-        assert(false);
+        return false;
     }
 }
 
 std::vector<DkScissor> ScissorStack;
+
+struct DrawTransform
+{
+    float M00 = 1.0f;
+    float M01 = 0.0f;
+    float M02 = 0.0f;
+    float M10 = 0.0f;
+    float M11 = 1.0f;
+    float M12 = 0.0f;
+};
+
+std::vector<DrawTransform> DrawTransformStack;
+
+DrawTransform CurrentDrawTransform()
+{
+    if (DrawTransformStack.empty())
+        return {};
+    return DrawTransformStack.back();
+}
+
+Vector2f TransformPoint(Vector2f point)
+{
+    const DrawTransform transform = CurrentDrawTransform();
+    return {
+        transform.M00 * point.X + transform.M01 * point.Y + transform.M02,
+        transform.M10 * point.X + transform.M11 * point.Y + transform.M12,
+    };
+}
+
+bool HasDrawTransform()
+{
+    const DrawTransform transform = CurrentDrawTransform();
+    return transform.M00 != 1.0f || transform.M01 != 0.0f || transform.M02 != 0.0f ||
+           transform.M10 != 0.0f || transform.M11 != 1.0f || transform.M12 != 0.0f;
+}
+
+void PushDrawTransform(float m00, float m01, float m02, float m10, float m11, float m12)
+{
+    const DrawTransform parent = CurrentDrawTransform();
+    DrawTransform next {};
+    next.M00 = m00 * parent.M00 + m01 * parent.M10;
+    next.M01 = m00 * parent.M01 + m01 * parent.M11;
+    next.M02 = m00 * parent.M02 + m01 * parent.M12 + m02;
+    next.M10 = m10 * parent.M00 + m11 * parent.M10;
+    next.M11 = m10 * parent.M01 + m11 * parent.M11;
+    next.M12 = m10 * parent.M02 + m11 * parent.M12 + m12;
+    DrawTransformStack.push_back(next);
+}
+
+void PopDrawTransform()
+{
+    if (!DrawTransformStack.empty())
+        DrawTransformStack.pop_back();
+}
+
 void PushScissor(u32 x, u32 y, u32 w, u32 h)
 {
+    if (HasDrawTransform())
+    {
+        const Vector2f p0 = TransformPoint({static_cast<float>(x), static_cast<float>(y)});
+        const Vector2f p1 = TransformPoint({static_cast<float>(x + w), static_cast<float>(y)});
+        const Vector2f p2 = TransformPoint({static_cast<float>(x), static_cast<float>(y + h)});
+        const Vector2f p3 = TransformPoint({static_cast<float>(x + w), static_cast<float>(y + h)});
+        const float minX = std::max(0.0f, std::floor(std::min({p0.X, p1.X, p2.X, p3.X})));
+        const float minY = std::max(0.0f, std::floor(std::min({p0.Y, p1.Y, p2.Y, p3.Y})));
+        const float maxX = std::min(1280.0f, std::ceil(std::max({p0.X, p1.X, p2.X, p3.X})));
+        const float maxY = std::min(720.0f, std::ceil(std::max({p0.Y, p1.Y, p2.Y, p3.Y})));
+        x = static_cast<u32>(minX);
+        y = static_cast<u32>(minY);
+        w = static_cast<u32>(std::max(1.0f, maxX - minX));
+        h = static_cast<u32>(std::max(1.0f, maxY - minY));
+    }
     ScissorStack.push_back({x, y, w, h});
 }
 
@@ -528,31 +748,69 @@ void DebugOutput(void* userData, const char* context, DkResult result, const cha
     printf("deko debug %d %s\n", result, message);
 }
 
+void InitNdsExtensions()
+{
+    if (NdsExtensionsInitialized)
+        return;
+
+    auto loadFragmentOrFallback = [](const char* path, ShaderMode mode, ShaderMode fallback) {
+        if (!LoadShader(path, FragmentShaders[mode]))
+        {
+            printf("falling back shader %s to mode %d\n", path, fallback);
+            FragmentShaders[mode] = FragmentShaders[fallback];
+        }
+    };
+    loadFragmentOrFallback("romfs:/shaders/NdsDot_fsh.dksh", shaderMode_NdsDot, shaderMode_Default);
+    loadFragmentOrFallback("romfs:/shaders/NdsDotClear_fsh.dksh", shaderMode_NdsDotClear, shaderMode_NdsDot);
+    loadFragmentOrFallback("romfs:/shaders/NdsXbrzFreescale_fsh.dksh", shaderMode_NdsXbrzFreescale, shaderMode_NdsDot);
+    loadFragmentOrFallback("romfs:/shaders/NdsLcdGridNdsColor_fsh.dksh", shaderMode_NdsLcdGridNdsColor, shaderMode_NdsDot);
+    loadFragmentOrFallback("romfs:/shaders/NdsDrasticSimple_fsh.dksh", shaderMode_NdsDrasticSimple, shaderMode_NdsDot);
+
+    NdsShaderUniformBuffer = DataHeap->Alloc(sizeof(NdsShaderUniform), DK_UNIFORM_BUF_ALIGNMENT);
+    NdsExtensionsInitialized = true;
+}
+
 void Init()
 {
+    GfxLog("GBAStationNDSStub: Gfx Init enter textureHeapMB=120 shaderHeapMB=48 dataHeapMB=896");
     Window = nwindowGetDefault();
+    GfxLog("GBAStationNDSStub: Gfx nwindowGetDefault ok window=%p", Window);
     nwindowSetDimensions(Window, 1920, 1080);
 
+    GfxLog("GBAStationNDSStub: Gfx device create begin");
     Device = dk::DeviceMaker{}.setCbDebug(DebugOutput).create();
+    GfxLog("GBAStationNDSStub: Gfx device create ok");
+    GfxLog("GBAStationNDSStub: Gfx present queue create begin");
     PresentQueue = dk::QueueMaker{Device}
         .setFlags(DkQueueFlags_Graphics|DkQueueFlags_DisableZcull)
         .setCommandMemorySize(DK_QUEUE_MIN_CMDMEM_SIZE*4)
         .setFlushThreshold(DK_QUEUE_MIN_CMDMEM_SIZE)
         .create();
+    GfxLog("GBAStationNDSStub: Gfx present queue create ok");
+    GfxLog("GBAStationNDSStub: Gfx emu queue create begin");
     EmuQueue = dk::QueueMaker{Device}
         .setFlags(DkQueueFlags_HighPrio|DkQueueFlags_Graphics|DkQueueFlags_Compute|DkQueueFlags_DisableZcull)
         .setCommandMemorySize(DK_QUEUE_MIN_CMDMEM_SIZE*4)
         .setFlushThreshold(DK_QUEUE_MIN_CMDMEM_SIZE)
         .create();
+    GfxLog("GBAStationNDSStub: Gfx emu queue create ok");
 
+    GfxLog("GBAStationNDSStub: Gfx TextureHeap create begin bytes=%u", 1024U*1024U*120U);
     TextureHeap.emplace(Device, 1024*1024*120, DkMemBlockFlags_GpuCached | DkMemBlockFlags_Image, 1024*8);
-    ShaderCodeHeap.emplace(Device, 1024*1024*12,
-        DkMemBlockFlags_CpuUncached | DkMemBlockFlags_GpuCached | DkMemBlockFlags_Code, 64);
-    DataHeap.emplace(Device, 1024*1024*256, DkMemBlockFlags_CpuUncached | DkMemBlockFlags_GpuCached, 128);
+    GfxLog("GBAStationNDSStub: Gfx TextureHeap create ok");
+    GfxLog("GBAStationNDSStub: Gfx ShaderCodeHeap create begin bytes=%u", 1024U*1024U*48U);
+    ShaderCodeHeap.emplace(Device, 1024*1024*48,
+        DkMemBlockFlags_CpuUncached | DkMemBlockFlags_GpuCached | DkMemBlockFlags_Code, 512);
+    GfxLog("GBAStationNDSStub: Gfx ShaderCodeHeap create ok");
+    GfxLog("GBAStationNDSStub: Gfx DataHeap create begin bytes=%u", 1024U*1024U*896U);
+    DataHeap.emplace(Device, 1024*1024*896, DkMemBlockFlags_CpuUncached | DkMemBlockFlags_GpuCached, 256);
+    GfxLog("GBAStationNDSStub: Gfx DataHeap create ok");
 
+    GfxLog("GBAStationNDSStub: Gfx command buffers create begin");
     PresentCmdBuf = dk::CmdBufMaker{Device}.create();
     EmuCmdBuf = dk::CmdBufMaker{Device}.create();
     CmdMem.emplace(*DataHeap, 0x10000*2);
+    GfxLog("GBAStationNDSStub: Gfx command buffers create ok");
 
     dk::ImageLayout fbLayout;
     dk::ImageLayoutMaker{Device}
@@ -563,24 +821,35 @@ void Init()
     std::array<DkImage const*, 2> fbArray;
     for (int i = 0; i < 2; i++)
     {
+        GfxLog("GBAStationNDSStub: Gfx swapchain framebuffer alloc begin index=%d bytes=%llu",
+               i, static_cast<unsigned long long>(fbLayout.getSize()));
         GpuMemHeap::Allocation block = TextureHeap->Alloc(fbLayout.getSize(), fbLayout.getAlignment());
         Framebuffers[i].initialize(fbLayout, TextureHeap->MemBlock, block.Offset);
         fbArray[i] = &Framebuffers[i];
+        GfxLog("GBAStationNDSStub: Gfx swapchain framebuffer alloc ok index=%d offset=%u size=%u",
+               i, block.Offset, block.Size);
     }
 
+    GfxLog("GBAStationNDSStub: Gfx swapchain create begin");
     Swapchain = dk::SwapchainMaker{Device, Window, fbArray}.create();
+    GfxLog("GBAStationNDSStub: Gfx swapchain create ok");
 
-    LoadShader("romfs:/shaders/Default_vsh.dksh", VertexShader);
-    LoadShader("romfs:/shaders/Default_fsh.dksh", FragmentShader);
+    const bool defaultVertexLoaded = LoadShader("romfs:/shaders/Default_vsh.dksh", VertexShader);
+    const bool defaultFragmentLoaded = LoadShader("romfs:/shaders/Default_fsh.dksh", FragmentShaders[shaderMode_Default]);
+    assert(defaultVertexLoaded);
+    assert(defaultFragmentLoaded);
+    GfxLog("GBAStationNDSStub: Gfx default shaders ok");
 
     for (int i = 0; i < 2; i++)
     {
+        GfxLog("GBAStationNDSStub: Gfx frame resources alloc begin slot=%d", i);
         VertexData[i] = DataHeap->Alloc(MaxVertices * sizeof(Vertex), alignof(Vertex));
         IndexData[i] = DataHeap->Alloc(MaxIndices * sizeof(u16), alignof(u16));
 
         TextureStagingBuffer[i] = DataHeap->Alloc(1024*1024*8, DK_MEMBLOCK_ALIGNMENT);
 
         ImageDescriptors[i] = DataHeap->Alloc(sizeof(dk::ImageDescriptor) * 1024, DK_IMAGE_DESCRIPTOR_ALIGNMENT);
+        GfxLog("GBAStationNDSStub: Gfx frame resources alloc ok slot=%d", i);
     }
     UniformBuffer = DataHeap->Alloc(sizeof(Transformation), DK_UNIFORM_BUF_ALIGNMENT);
 
@@ -598,31 +867,40 @@ void Init()
         }
     }
 
-    // load system font
+    GfxLog("GBAStationNDSStub: Gfx system fonts begin");
     plInitialize(PlServiceType_User);
-    PlFontData font;
-
-    plGetSharedFontByType(&font, PlSharedFontType_Standard);
-    SystemFontStandardData = new u8[font.size];
-    memcpy(SystemFontStandardData, font.address, font.size);
+    SystemFontStandardData = CopySharedFont(PlSharedFontType_Standard);
     SystemFontStandard = FontLoad(SystemFontStandardData);
 
-    plGetSharedFontByType(&font, PlSharedFontType_NintendoExt);
-    SystemFontNintendoExtData = new u8[font.size];
-    memcpy(SystemFontNintendoExtData, font.address, font.size);
+    SystemFontNintendoExtData = CopySharedFont(PlSharedFontType_NintendoExt);
     SystemFontNintendoExt = FontLoad(SystemFontNintendoExtData);
-    plExit();
 
+    SystemFontChineseData = CopySharedFont(PlSharedFontType_ChineseSimplified);
+    if (!SystemFontChineseData)
+        SystemFontChineseData = CopySharedFont(PlSharedFontType_ExtChineseSimplified);
+    if (!SystemFontChineseData)
+        SystemFontChineseData = SystemFontStandardData;
+    SystemFontChinese = FontLoad(SystemFontChineseData);
+    plExit();
+    GfxLog("GBAStationNDSStub: Gfx system fonts ok standard=%p ext=%p chinese=%p",
+           SystemFontStandardData, SystemFontNintendoExtData, SystemFontChineseData);
+
+    GfxLog("GBAStationNDSStub: Gfx white texture create begin");
     WhiteTexture = TextureCreate(8, 8, DkImageFormat_R8_Unorm);
     TextureSetSwizzle(WhiteTexture, DkImageSwizzle_One, DkImageSwizzle_One, DkImageSwizzle_One, DkImageSwizzle_One);
+    GfxLog("GBAStationNDSStub: Gfx Init ok whiteTexture=%u", WhiteTexture);
 }
 
 void DeInit()
 {
+    NdsExtensionsInitialized = false;
     FontDelete(SystemFontNintendoExt);
     FontDelete(SystemFontStandard);
+    FontDelete(SystemFontChinese);
     delete[] SystemFontStandardData;
     delete[] SystemFontNintendoExtData;
+    if (SystemFontChineseData != SystemFontStandardData)
+        delete[] SystemFontChineseData;
 
     FontAtlas.Destroy();
 
@@ -681,6 +959,10 @@ void Rotate90Deg(u32& outX, u32& outY, u32 inX, u32 inY, int rotation)
 void StartFrame()
 {
     SwapchainSlot = PresentQueue.acquireImage(Swapchain);
+    FrameActive = true;
+    DrawTransformStack.clear();
+    CurShaderMode = shaderMode_Default;
+    CurSampler = sampler_Nearest | sampler_ClampToEdge;
 
     AnimationTimestamp = armTicksToNs(armGetSystemTick()) * 0.000000001;
     if (!DoSkipTimestep)
@@ -716,20 +998,15 @@ void EndFrame(Color clearColor, int rotation)
 
     CmdMem->Begin(PresentCmdBuf);
 
-    DkGpuAddr stagingBufferGpuAddr = DataHeap->GpuAddr(TextureStagingBuffer[SwapchainSlot]);
     for (u32 i = 0; i < TextureUploadsPending.size(); i++)
     {
         PendingTextureUpload& upload = TextureUploadsPending[i];
         Texture& texture = Textures[upload.TextureIdx];
         dk::ImageView view{texture.Image};
+        DkGpuAddr stagingBufferGpuAddr = DataHeap->GpuAddr(TextureStagingBuffer[upload.StagingSlot]) + upload.StagingOffsetBytes;
         assert((stagingBufferGpuAddr & (DK_IMAGE_LINEAR_STRIDE_ALIGNMENT - 1)) == 0);
         PresentCmdBuf.copyBufferToImage({stagingBufferGpuAddr, upload.DataStrideBytes, upload.Height}, view, {upload.X, upload.Y, 0, upload.Width, upload.Height, 1});
-
-        u32 stride = upload.DataStrideBytes * upload.Height;
-        stagingBufferGpuAddr += stride;
-        stagingBufferGpuAddr = (stagingBufferGpuAddr + DK_IMAGE_LINEAR_STRIDE_ALIGNMENT - 1) & ~(DK_IMAGE_LINEAR_STRIDE_ALIGNMENT - 1);
     }
-    assert(stagingBufferGpuAddr - DataHeap->GpuAddr(TextureStagingBuffer[SwapchainSlot]) == TextureStagingBufferOffset);
     if (TextureUploadsPending.size() > 0)
     {
         TextureStagingBufferOffset = 0;
@@ -741,9 +1018,11 @@ void EndFrame(Color clearColor, int rotation)
     dk::ImageView colorTarget{Framebuffers[SwapchainSlot]};
     PresentCmdBuf.bindRenderTargets(&colorTarget);
 
+    PresentCmdBuf.setScissors(0, {{0, 0, 1920, 1080}});
+    PresentCmdBuf.setViewports(0, {{0, 0, 1920.0f, 1080.0f}});
+    PresentCmdBuf.clearColor(0, DkColorMask_RGBA, clearColor.R, clearColor.G, clearColor.B, clearColor.A);
     PresentCmdBuf.setScissors(0, {{0, 0, fbPixelWidth, fbPixelHeight}});
     PresentCmdBuf.setViewports(0, {{0, 0, (float)fbPixelWidth, (float)fbPixelHeight}});
-    PresentCmdBuf.clearColor(0, DkColorMask_RGBA, clearColor.R, clearColor.G, clearColor.B, clearColor.A);
 
     PresentCmdBuf.bindDepthStencilState(dk::DepthStencilState{}
         .setDepthWriteEnable(false)
@@ -766,7 +1045,7 @@ void EndFrame(Color clearColor, int rotation)
     PresentCmdBuf.bindVtxBufferState({{sizeof(Vertex), 0}});
     PresentCmdBuf.bindIdxBuffer(DkIdxFormat_Uint16, DataHeap->GpuAddr(IndexData[SwapchainSlot]));
 
-    {
+    auto bindScreenProjection = [&]() {
         Transformation transformation;
         xm4_orthographic(transformation.Projection, -1280.f/2, 1280.f/2, 720.f/2.f, -720.f/2, -1.f, 1.f);
         float rot[16];
@@ -781,7 +1060,43 @@ void EndFrame(Color clearColor, int rotation)
         transformation.InvHeight = 1.f / screenHeight;
         PresentCmdBuf.pushConstants(DataHeap->GpuAddr(UniformBuffer), UniformBuffer.Size, 0, sizeof(Transformation), &transformation);
         PresentCmdBuf.bindUniformBuffer(DkStage_Vertex, 0, DataHeap->GpuAddr(UniformBuffer), UniformBuffer.Size);
-    }
+    };
+    auto bindOffscreenProjection = [&](u32 width, u32 height) {
+        Transformation transformation;
+        xm4_orthographic(transformation.Projection,
+                         -static_cast<float>(width) / 2.0f,
+                          static_cast<float>(width) / 2.0f,
+                          static_cast<float>(height) / 2.0f,
+                         -static_cast<float>(height) / 2.0f,
+                         -1.0f,
+                          1.0f);
+        float trans[16];
+        xm4_translatev(trans, -static_cast<float>(width) / 2.0f, -static_cast<float>(height) / 2.0f, 0.0f);
+        xm4_mul(transformation.Projection, trans, transformation.Projection);
+        transformation.InvHeight = 1.0f / static_cast<float>(std::max<u32>(height, 1));
+        PresentCmdBuf.pushConstants(DataHeap->GpuAddr(UniformBuffer), UniformBuffer.Size, 0, sizeof(Transformation), &transformation);
+        PresentCmdBuf.bindUniformBuffer(DkStage_Vertex, 0, DataHeap->GpuAddr(UniformBuffer), UniformBuffer.Size);
+    };
+    auto bindNdsParams = [&](const std::array<float, 8>& values, float sourceScale) {
+        NdsShaderUniform params {};
+        for (int i = 0; i < 4; ++i)
+        {
+            params.Param0[i] = values[i];
+            params.Param1[i] = values[i + 4];
+        }
+        params.Runtime[0] = std::max(sourceScale, 1.0f);
+        PresentCmdBuf.pushConstants(DataHeap->GpuAddr(NdsShaderUniformBuffer),
+                                    NdsShaderUniformBuffer.Size,
+                                    0,
+                                    sizeof(NdsShaderUniform),
+                                    &params);
+        PresentCmdBuf.bindUniformBuffer(DkStage_Fragment,
+                                        1,
+                                        DataHeap->GpuAddr(NdsShaderUniformBuffer),
+                                        NdsShaderUniformBuffer.Size);
+    };
+    bindScreenProjection();
+    bindNdsParams(CurNdsShaderParams, 1.0f);
 
     memcpy(DataHeap->CpuAddr<void>(VertexData[SwapchainSlot]), VertexDataClient, sizeof(Vertex)*CurClientVertex);
     memcpy(DataHeap->CpuAddr<void>(IndexData[SwapchainSlot]), IndexDataClient, sizeof(u16)*CurClientIndex);
@@ -804,24 +1119,99 @@ void EndFrame(Color clearColor, int rotation)
         PresentCmdBuf.bindImageDescriptorSet(DataHeap->GpuAddr(ImageDescriptors[SwapchainSlot]), UsedTextures.size());
     }
 
-    u32 indexBufferOffset = 0;
+    bool gpuStateDirty = true;
 
     for (u32 i = 0; i < DrawCalls.size(); i++)
     {
         DrawCall& drawCall = DrawCalls[i];
-        if (drawCall.Dirty & drawCallDirty_WaitFence)
+        if (drawCall.Kind == DrawCallKind::WaitFence)
         {
             assert(drawCall.Fence);
             PresentCmdBuf.waitFence(*drawCall.Fence);
+            gpuStateDirty = true;
         }
-        else if (drawCall.Dirty & drawCallDirty_SignalFence)
+        else if (drawCall.Kind == DrawCallKind::SignalFence)
         {
             assert(drawCall.Fence);
             PresentCmdBuf.signalFence(*drawCall.Fence);
+            gpuStateDirty = true;
+        }
+        else if (drawCall.Kind == DrawCallKind::NdsMultiPass)
+        {
+            NdsMultiPassDraw& multi = drawCall.MultiPass;
+            if (multi.PassCount < 2)
+            {
+                gpuStateDirty = true;
+                continue;
+            }
+
+            auto bindTexture = [&](u32 texture, u32 sampler) {
+                assert(Textures[texture].ImageDescriptorIdx != -1);
+                assert(Textures[texture].ImageDescriptorIdx < UsedTextures.size());
+                PresentCmdBuf.bindTextures(DkStage_Fragment, 0,
+                    dkMakeTextureHandle(Textures[texture].ImageDescriptorIdx, sampler));
+            };
+            auto bindPassParams = [&](const NdsFilterPass& pass, float sourceScale) {
+                std::array<float, 8> values = CurNdsShaderParams;
+                values[7] = static_cast<float>(pass.Code);
+                bindNdsParams(values, sourceScale);
+            };
+
+            u32 sourceTexture = multi.SourceTexture;
+            float sourceScale = std::max(multi.SourceScale, 1.0f);
+            for (int passIndex = 0; passIndex < multi.PassCount - 1; ++passIndex)
+            {
+                const NdsFilterPass& pass = multi.Passes[passIndex];
+                const u32 targetTexture = (passIndex % 2 == 0) ? multi.TempTextureA : multi.TempTextureB;
+                Texture& target = Textures[targetTexture];
+                dk::ImageView targetView{target.Image};
+                PresentCmdBuf.bindRenderTargets(&targetView);
+                PresentCmdBuf.setViewports(0, {{0.0f, 0.0f, static_cast<float>(multi.TempWidth), static_cast<float>(multi.TempHeight)}});
+                PresentCmdBuf.setScissors(0, {{0, 0, multi.TempWidth, multi.TempHeight}});
+                PresentCmdBuf.clearColor(0, DkColorMask_RGBA, 0.0f, 0.0f, 0.0f, 0.0f);
+                bindOffscreenProjection(multi.TempWidth, multi.TempHeight);
+                bindPassParams(pass, sourceScale);
+                bindTexture(sourceTexture, pass.Sampler);
+                PresentCmdBuf.bindShaders(DkStageFlag_GraphicsMask, {&VertexShader, &FragmentShaders[pass.Shader]});
+                const u32 indexOffset = (passIndex == 0) ? multi.InitialIndexOffset : multi.IntermediateIndexOffset;
+                PresentCmdBuf.drawIndexed(DkPrimitive_Triangles, 6, 1, indexOffset, 0, 0);
+                PresentCmdBuf.barrier(DkBarrier_Full, 0);
+                sourceTexture = targetTexture;
+                sourceScale *= std::max(pass.OutputScale, 1);
+            }
+
+            dk::ImageView mainTarget{Framebuffers[SwapchainSlot]};
+            PresentCmdBuf.bindRenderTargets(&mainTarget);
+            PresentCmdBuf.setViewports(0, {{0.0f, 0.0f, static_cast<float>(fbPixelWidth), static_cast<float>(fbPixelHeight)}});
+            DkScissor scissor = multi.Scissor;
+            u32 x1, y1, x2, y2;
+            Rotate90DegInv(x1, y1, scissor.x, scissor.y, rotation);
+            Rotate90DegInv(x2, y2, scissor.x + scissor.width, scissor.y + scissor.height, rotation);
+            scissor.x = std::min(x1, x2);
+            scissor.y = std::min(y1, y2);
+            scissor.width = abs((s32)x1 - (s32)x2);
+            scissor.height = abs((s32)y1 - (s32)y2);
+            if (fbPixelHeight == 1080)
+            {
+                scissor.x = scissor.x * 3 / 2;
+                scissor.y = scissor.y * 3 / 2;
+                scissor.width = scissor.width * 3 / 2;
+                scissor.height = scissor.height * 3 / 2;
+            }
+            PresentCmdBuf.setScissors(0, {scissor});
+            bindScreenProjection();
+
+            const NdsFilterPass& finalPass = multi.Passes[multi.PassCount - 1];
+            bindPassParams(finalPass, sourceScale);
+            bindTexture(sourceTexture, finalPass.Sampler);
+            PresentCmdBuf.bindShaders(DkStageFlag_GraphicsMask, {&VertexShader, &FragmentShaders[finalPass.Shader]});
+            PresentCmdBuf.drawIndexed(DkPrimitive_Triangles, 6, 1, multi.FinalIndexOffset, 0, 0);
+            bindNdsParams(CurNdsShaderParams, 1.0f);
+            gpuStateDirty = true;
         }
         else
         {
-            if (drawCall.Dirty & drawCallDirty_Scissor)
+            if ((drawCall.Dirty & drawCallDirty_Scissor) || gpuStateDirty)
             {
                 // hacky
                 DkScissor scissor = drawCall.Scissor;
@@ -842,25 +1232,29 @@ void EndFrame(Color clearColor, int rotation)
                 }
                 PresentCmdBuf.setScissors(0, {scissor});
             }
-            if (drawCall.Dirty & (drawCallDirty_Texture|drawCallDirty_Sampler))
+            if ((drawCall.Dirty & (drawCallDirty_Texture|drawCallDirty_Sampler)) || gpuStateDirty)
             {
                 assert(Textures[drawCall.TextureIdx].ImageDescriptorIdx != -1);
                 assert(Textures[drawCall.TextureIdx].ImageDescriptorIdx < UsedTextures.size());
                 PresentCmdBuf.bindTextures(DkStage_Fragment, 0,
                     dkMakeTextureHandle(Textures[drawCall.TextureIdx].ImageDescriptorIdx, drawCall.Sampler));
             }
-            if (drawCall.Dirty & drawCallDirty_Shader)
+            if ((drawCall.Dirty & drawCallDirty_Shader) || gpuStateDirty)
             {
-                PresentCmdBuf.bindShaders(DkStageFlag_GraphicsMask, {&VertexShader, &FragmentShader});
+                PresentCmdBuf.bindShaders(DkStageFlag_GraphicsMask, {&VertexShader, &FragmentShaders[drawCall.Shader]});
             }
 
-            PresentCmdBuf.drawIndexed(DkPrimitive_Triangles, drawCall.Count, 1, indexBufferOffset, 0, 0);
-            indexBufferOffset += drawCall.Count;
+            if (drawCall.Shader != shaderMode_Default)
+                bindNdsParams(CurNdsShaderParams, drawCall.NdsSourceScale);
+
+            PresentCmdBuf.drawIndexed(DkPrimitive_Triangles, drawCall.Count, 1, drawCall.IndexOffset, 0, 0);
+            gpuStateDirty = false;
         }
     }
 
     PresentQueue.submitCommands(CmdMem->End(PresentCmdBuf));
     PresentQueue.presentImage(Swapchain, SwapchainSlot);
+    FrameActive = false;
 
     DrawCalls.clear();
     for (u32 i = 0; i < UsedTextures.size(); i++)
@@ -870,15 +1264,15 @@ void EndFrame(Color clearColor, int rotation)
 
 void WaitForFenceReady(dk::Fence& fence)
 {
-    DrawCalls.push_back({drawCallDirty_WaitFence, 0, 0, 0, DkScissor(), &fence});
+    DrawCalls.push_back({DrawCallKind::WaitFence, drawCallDirty_WaitFence, 0, 0, shaderMode_Default, 0, 0, DkScissor(), &fence, {}});
 }
 
 void SignalFence(dk::Fence& fence)
 {
-    DrawCalls.push_back({drawCallDirty_SignalFence, 0, 0, 0, DkScissor(), &fence});
+    DrawCalls.push_back({DrawCallKind::SignalFence, drawCallDirty_SignalFence, 0, 0, shaderMode_Default, 0, 0, DkScissor(), &fence, {}});
 }
 
-void IssueDrawCall(u32 texture, u32 count)
+void IssueDrawCall(u32 texture, u32 count, u32 indexOffset)
 {
     u32 dirty = 0;
     DkScissor& curScissor = ScissorStack[ScissorStack.size() - 1];
@@ -886,37 +1280,57 @@ void IssueDrawCall(u32 texture, u32 count)
     if (DrawCalls.size() > 0)
     {
         DrawCall& prevDrawCall = DrawCalls[DrawCalls.size() - 1];
-        if (prevDrawCall.TextureIdx != texture)
-            dirty |= drawCallDirty_Texture;
-        if (prevDrawCall.Sampler != CurSampler)
-            dirty |= drawCallDirty_Sampler;
-
-        if (prevDrawCall.Scissor.x != curScissor.x
-            || prevDrawCall.Scissor.y != curScissor.y
-            || prevDrawCall.Scissor.width != curScissor.width
-            || prevDrawCall.Scissor.height != curScissor.height)
+        if (prevDrawCall.Kind != DrawCallKind::Draw)
         {
-            dirty |= drawCallDirty_Scissor;
-        }
-
-        if (prevDrawCall.Fence)
+            dirty = ~(drawCallDirty_WaitFence|drawCallDirty_SignalFence);
             lastWasFence = true;
+        }
+        else if (prevDrawCall.TextureIdx != texture)
+            dirty |= drawCallDirty_Texture;
+        if (prevDrawCall.Kind == DrawCallKind::Draw)
+        {
+            if (prevDrawCall.Sampler != CurSampler)
+                dirty |= drawCallDirty_Sampler;
+            if (prevDrawCall.Shader != CurShaderMode)
+                dirty |= drawCallDirty_Shader;
+            if (prevDrawCall.NdsSourceScale != CurNdsSourceScale)
+                dirty |= drawCallDirty_Shader;
+
+            if (prevDrawCall.Scissor.x != curScissor.x
+                || prevDrawCall.Scissor.y != curScissor.y
+                || prevDrawCall.Scissor.width != curScissor.width
+                || prevDrawCall.Scissor.height != curScissor.height)
+            {
+                dirty |= drawCallDirty_Scissor;
+            }
+        }
     }
     else
     {
         dirty = ~(drawCallDirty_WaitFence|drawCallDirty_SignalFence);
     }
 
-    if (Textures[texture].ImageDescriptorIdx == -1)
-    {
-        Textures[texture].ImageDescriptorIdx = UsedTextures.size();
-        UsedTextures.push_back(texture);
-    }
+    UseTexture(texture);
 
     if (dirty || lastWasFence)
-        DrawCalls.push_back({dirty, texture, CurSampler, count, curScissor, nullptr});
+        DrawCalls.push_back({DrawCallKind::Draw, dirty, texture, CurSampler, CurShaderMode, indexOffset, count, curScissor, nullptr, {}, CurNdsSourceScale});
     else
         DrawCalls[DrawCalls.size() - 1].Count += count;
+}
+
+void SetShaderMode(ShaderMode mode)
+{
+    CurShaderMode = (mode >= shaderMode_Default && mode < shaderMode_Count) ? mode : shaderMode_Default;
+}
+
+void SetNdsShaderParams(const std::array<float, 8>& params)
+{
+    CurNdsShaderParams = params;
+}
+
+void SetNdsSourceScale(float scale)
+{
+    CurNdsSourceScale = std::max(scale, 1.0f);
 }
 
 void SetSampler(u32 sampler)
@@ -945,21 +1359,25 @@ void DrawRectangle(u32 texIdx,
     float coolTransparencyMax = coolTransparency ? 0.9f : 1.f;
 
     Vector2f outerBounds = position + size;
+    const Vector2f p0 = TransformPoint(position);
+    const Vector2f p1 = TransformPoint({outerBounds.X, position.Y});
+    const Vector2f p2 = TransformPoint({position.X, outerBounds.Y});
+    const Vector2f p3 = TransformPoint(outerBounds);
 
     assert(CurClientVertex + 4 <= MaxVertices);
-    VertexDataClient[CurClientVertex + 0] = {position.X, position.Y,
+    VertexDataClient[CurClientVertex + 0] = {p0.X, p0.Y,
         uvMin.X, uvMin.Y,
         tintR8, tintG8, tintB8, tintA8,
         coolTransparencyMin, coolTransparencyMax};
-    VertexDataClient[CurClientVertex + 1] = {outerBounds.X, position.Y,
+    VertexDataClient[CurClientVertex + 1] = {p1.X, p1.Y,
         uvMax.X, uvMin.Y, tintR8,
         tintG8, tintB8, tintA8,
         coolTransparencyMin, coolTransparencyMax};
-    VertexDataClient[CurClientVertex + 2] = {position.X, outerBounds.Y,
+    VertexDataClient[CurClientVertex + 2] = {p2.X, p2.Y,
         uvMin.X, uvMax.Y,
         tintR8, tintG8, tintB8, tintA8,
         coolTransparencyMin, coolTransparencyMax};
-    VertexDataClient[CurClientVertex + 3] = {outerBounds.X, outerBounds.Y,
+    VertexDataClient[CurClientVertex + 3] = {p3.X, p3.Y,
         uvMax.X, uvMax.Y,
         tintR8, tintG8, tintB8, tintA8,
         coolTransparencyMin, coolTransparencyMax};
@@ -972,7 +1390,7 @@ void DrawRectangle(u32 texIdx,
     IndexDataClient[CurClientIndex + 4] = CurClientVertex + 3;
     IndexDataClient[CurClientIndex + 5] = CurClientVertex + 1;
 
-    IssueDrawCall(texIdx, 6);
+    IssueDrawCall(texIdx, 6, CurClientIndex);
 
     CurClientVertex += 4;
     CurClientIndex += 6;
@@ -992,17 +1410,50 @@ void DrawRectangle(u32 texIdx,
     Vector2f p0, Vector2f p1, Vector2f p2, Vector2f p3,
     Vector2f subPosition, Vector2f subSize)
 {
+    DrawRectangle(texIdx, p0, p1, p2, p3, subPosition, subSize, {1.0f, 1.0f, 1.0f, 1.0f});
+}
+
+void DrawRectangle(u32 texIdx,
+    Vector2f p0, Vector2f p1, Vector2f p2, Vector2f p3,
+    Vector2f subPosition, Vector2f subSize,
+    Color tint,
+    bool coolTransparency)
+{
     Texture& texture = Textures[texIdx];
 
     Vector2f rcpTexSize{1.f / texture.Width, 1.f / texture.Height};
     Vector2f uvMin = subPosition * rcpTexSize;
     Vector2f uvMax = uvMin + subSize * rcpTexSize;
+    p0 = TransformPoint(p0);
+    p1 = TransformPoint(p1);
+    p2 = TransformPoint(p2);
+    p3 = TransformPoint(p3);
+
+    u8 tintR8 = tint.R * 255;
+    u8 tintG8 = tint.G * 255;
+    u8 tintB8 = tint.B * 255;
+    u8 tintA8 = tint.A * 255;
+
+    float coolTransparencyMin = coolTransparency ? 0.6f : 1.f;
+    float coolTransparencyMax = coolTransparency ? 0.9f : 1.f;
 
     assert(CurClientVertex + 4 <= MaxVertices);
-    VertexDataClient[CurClientVertex + 0] = {p0.X, p0.Y, uvMin.X, uvMin.Y, 255, 255, 255, 255, 1.f, 1.f};
-    VertexDataClient[CurClientVertex + 1] = {p1.X, p1.Y, uvMax.X, uvMin.Y, 255, 255, 255, 255, 1.f, 1.f};
-    VertexDataClient[CurClientVertex + 2] = {p2.X, p2.Y, uvMin.X, uvMax.Y, 255, 255, 255, 255, 1.f, 1.f};
-    VertexDataClient[CurClientVertex + 3] = {p3.X, p3.Y, uvMax.X, uvMax.Y, 255, 255, 255, 255, 1.f, 1.f};
+    VertexDataClient[CurClientVertex + 0] = {p0.X, p0.Y,
+        uvMin.X, uvMin.Y,
+        tintR8, tintG8, tintB8, tintA8,
+        coolTransparencyMin, coolTransparencyMax};
+    VertexDataClient[CurClientVertex + 1] = {p1.X, p1.Y,
+        uvMax.X, uvMin.Y,
+        tintR8, tintG8, tintB8, tintA8,
+        coolTransparencyMin, coolTransparencyMax};
+    VertexDataClient[CurClientVertex + 2] = {p2.X, p2.Y,
+        uvMin.X, uvMax.Y,
+        tintR8, tintG8, tintB8, tintA8,
+        coolTransparencyMin, coolTransparencyMax};
+    VertexDataClient[CurClientVertex + 3] = {p3.X, p3.Y,
+        uvMax.X, uvMax.Y,
+        tintR8, tintG8, tintB8, tintA8,
+        coolTransparencyMin, coolTransparencyMax};
 
     assert(CurClientIndex + 6 <= MaxIndices);
     IndexDataClient[CurClientIndex + 0] = CurClientVertex;
@@ -1012,10 +1463,108 @@ void DrawRectangle(u32 texIdx,
     IndexDataClient[CurClientIndex + 4] = CurClientVertex + 3;
     IndexDataClient[CurClientIndex + 5] = CurClientVertex + 1;
 
-    IssueDrawCall(texIdx, 6);
+    IssueDrawCall(texIdx, 6, CurClientIndex);
 
     CurClientVertex += 4;
     CurClientIndex += 6;
+}
+
+void DrawNdsMultiPassRectangle(u32 texIdx,
+    Vector2f p0, Vector2f p1, Vector2f p2, Vector2f p3,
+    Vector2f subPosition, Vector2f subSize,
+    const NdsFilterPass* passes,
+    int passCount,
+    u32 tempTextureA,
+    u32 tempTextureB,
+    u32 tempWidth,
+    u32 tempHeight)
+{
+    passCount = std::clamp(passCount, 0, 4);
+    if (passCount < 2 || !passes || tempTextureA == 0 || tempTextureB == 0 || tempWidth == 0 || tempHeight == 0)
+    {
+        DrawRectangle(texIdx, p0, p1, p2, p3, subPosition, subSize);
+        return;
+    }
+
+    UseTexture(texIdx);
+    UseTexture(tempTextureA);
+    UseTexture(tempTextureB);
+
+    auto appendQuad = [&](Vector2f q0, Vector2f q1, Vector2f q2, Vector2f q3,
+                          Vector2f uvMin, Vector2f uvMax,
+                          bool applyTransform) {
+        if (applyTransform)
+        {
+            q0 = TransformPoint(q0);
+            q1 = TransformPoint(q1);
+            q2 = TransformPoint(q2);
+            q3 = TransformPoint(q3);
+        }
+        const u32 indexOffset = CurClientIndex;
+        assert(CurClientVertex + 4 <= MaxVertices);
+        VertexDataClient[CurClientVertex + 0] = {q0.X, q0.Y, uvMin.X, uvMin.Y, 255, 255, 255, 255, 1.0f, 1.0f};
+        VertexDataClient[CurClientVertex + 1] = {q1.X, q1.Y, uvMax.X, uvMin.Y, 255, 255, 255, 255, 1.0f, 1.0f};
+        VertexDataClient[CurClientVertex + 2] = {q2.X, q2.Y, uvMin.X, uvMax.Y, 255, 255, 255, 255, 1.0f, 1.0f};
+        VertexDataClient[CurClientVertex + 3] = {q3.X, q3.Y, uvMax.X, uvMax.Y, 255, 255, 255, 255, 1.0f, 1.0f};
+        assert(CurClientIndex + 6 <= MaxIndices);
+        IndexDataClient[CurClientIndex + 0] = CurClientVertex;
+        IndexDataClient[CurClientIndex + 1] = CurClientVertex + 2;
+        IndexDataClient[CurClientIndex + 2] = CurClientVertex + 3;
+        IndexDataClient[CurClientIndex + 3] = CurClientVertex;
+        IndexDataClient[CurClientIndex + 4] = CurClientVertex + 3;
+        IndexDataClient[CurClientIndex + 5] = CurClientVertex + 1;
+        CurClientVertex += 4;
+        CurClientIndex += 6;
+        return indexOffset;
+    };
+
+    Texture& sourceTexture = Textures[texIdx];
+    const Vector2f sourceUvMin{subPosition.X / static_cast<float>(sourceTexture.Width),
+                               subPosition.Y / static_cast<float>(sourceTexture.Height)};
+    const Vector2f sourceUvMax{sourceUvMin.X + subSize.X / static_cast<float>(sourceTexture.Width),
+                               sourceUvMin.Y + subSize.Y / static_cast<float>(sourceTexture.Height)};
+    const u32 initialOffset = appendQuad({0.0f, 0.0f},
+                                         {static_cast<float>(tempWidth), 0.0f},
+                                         {0.0f, static_cast<float>(tempHeight)},
+                                         {static_cast<float>(tempWidth), static_cast<float>(tempHeight)},
+                                         sourceUvMin,
+                                         sourceUvMax,
+                                         false);
+    const u32 intermediateOffset = appendQuad({0.0f, 0.0f},
+                                              {static_cast<float>(tempWidth), 0.0f},
+                                              {0.0f, static_cast<float>(tempHeight)},
+                                              {static_cast<float>(tempWidth), static_cast<float>(tempHeight)},
+                                              {0.0f, 0.0f},
+                                              {1.0f, 1.0f},
+                                              false);
+    const u32 finalOffset = appendQuad(p0, p1, p2, p3, {0.0f, 0.0f}, {1.0f, 1.0f}, true);
+
+    NdsMultiPassDraw multi {};
+    multi.SourceTexture = texIdx;
+    multi.TempTextureA = tempTextureA;
+    multi.TempTextureB = tempTextureB;
+    multi.TempWidth = tempWidth;
+    multi.TempHeight = tempHeight;
+    multi.InitialIndexOffset = initialOffset;
+    multi.IntermediateIndexOffset = intermediateOffset;
+    multi.FinalIndexOffset = finalOffset;
+    multi.PassCount = passCount;
+    multi.SourceScale = CurNdsSourceScale;
+    for (int i = 0; i < passCount; ++i)
+        multi.Passes[i] = passes[i];
+    multi.Scissor = ScissorStack[ScissorStack.size() - 1];
+
+    DrawCalls.push_back({DrawCallKind::NdsMultiPass,
+                         static_cast<u32>(~(drawCallDirty_WaitFence | drawCallDirty_SignalFence)),
+                         texIdx,
+                         CurSampler,
+                         CurShaderMode,
+                         finalOffset,
+                         6,
+                         multi.Scissor,
+                         nullptr,
+                         multi,
+                         CurNdsSourceScale});
 }
 
 Vector2f MeasureText(u32 fontIdx, float size, const char* text)
@@ -1107,6 +1656,7 @@ Vector2f DrawText(u32 fontIdx, Vector2f position, float size, Color color, int h
         }
     }
 
+    SetSampler(sampler_Nearest|sampler_ClampToEdge);
     bounds.X = std::max(bounds.X, offset.X);
 
     return bounds;

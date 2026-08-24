@@ -1,6 +1,8 @@
 #ifndef GFX_H
 #define GFX_H
 
+#include <array>
+
 #include <switch.h>
 #include <deko3d.hpp>
 
@@ -150,9 +152,11 @@ extern std::optional<GpuMemHeap> ShaderCodeHeap;
 extern std::optional<GpuMemHeap> DataHeap;
 
 void Init();
+void InitNdsExtensions();
 void DeInit();
 
 u32 TextureCreate(u32 width, u32 height, DkImageFormat format);
+u32 TextureCreateRenderTarget(u32 width, u32 height, DkImageFormat format);
 u32 TextureCreateExternal(u32 width, u32 height, dk::Image& image);
 void TextureDelete(u32 idx);
 // this is meant to be used sparsely
@@ -165,6 +169,7 @@ void FontDelete(u32 idx);
 
 extern u32 SystemFontStandard;
 extern u32 SystemFontNintendoExt;
+extern u32 SystemFontChinese;
 
 extern u32 WhiteTexture;
 
@@ -179,13 +184,38 @@ enum
     sampler_ClampToEdge = 1 << 1,
 };
 
-void LoadShader(const char* path, dk::Shader& out);
+bool LoadShader(const char* path, dk::Shader& out);
 
 void StartFrame();
 void EndFrame(Color clearColor, int rotation);
 void SkipTimestep();
 
+enum ShaderMode
+{
+    shaderMode_Default = 0,
+    shaderMode_NdsDot,
+    shaderMode_NdsDotClear,
+    shaderMode_NdsXbrzFreescale,
+    shaderMode_NdsLcdGridNdsColor,
+    shaderMode_NdsDrasticSimple,
+    shaderMode_Count
+};
+
+void SetShaderMode(ShaderMode mode);
+void SetNdsShaderParams(const std::array<float, 8>& params);
+void SetNdsSourceScale(float scale);
 void SetSampler(u32 sampler);
+
+struct NdsFilterPass
+{
+    ShaderMode Shader = shaderMode_Default;
+    int Code = 0;
+    int OutputScale = 1;
+    u32 Sampler = sampler_Nearest | sampler_ClampToEdge;
+};
+
+void PushDrawTransform(float m00, float m01, float m02, float m10, float m11, float m12);
+void PopDrawTransform();
 
 void PushScissor(u32 x, u32 y, u32 w, u32 h);
 void PopScissor();
@@ -207,6 +237,20 @@ void DrawRectangle(u32 texIdx,
 void DrawRectangle(u32 texIdx,
     Vector2f p0, Vector2f p1, Vector2f p2, Vector2f p3,
     Vector2f subPosition, Vector2f subSize);
+void DrawRectangle(u32 texIdx,
+    Vector2f p0, Vector2f p1, Vector2f p2, Vector2f p3,
+    Vector2f subPosition, Vector2f subSize,
+    Color tint,
+    bool coolTransparency = false);
+void DrawNdsMultiPassRectangle(u32 texIdx,
+    Vector2f p0, Vector2f p1, Vector2f p2, Vector2f p3,
+    Vector2f subPosition, Vector2f subSize,
+    const NdsFilterPass* passes,
+    int passCount,
+    u32 tempTextureA,
+    u32 tempTextureB,
+    u32 tempWidth,
+    u32 tempHeight);
 
 enum
 {
@@ -226,6 +270,11 @@ enum
 #define GFX_NINTENDOFONT_BACK "\uE072"
 #define GFX_NINTENDOFONT_WII_HAND "\uE062"
 #define GFX_NINTENDOFONT_WII_HAND_HOLD "\uE05D"
+
+
+
+
+
 
 Vector2f MeasureText(u32 fontIdx, float size, const char* text);
 

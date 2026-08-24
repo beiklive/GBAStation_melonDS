@@ -18,7 +18,7 @@ add_library(core STATIC
 	DSi.cpp
 	DSi_AES.cpp
 	DSi_Camera.cpp
-	DSi_DSP.cpp
+	$<$<NOT:$<BOOL:${SWITCH}>>:DSi_DSP.cpp>
 	DSi_I2C.cpp
 	DSi_NDMA.cpp
 	DSi_NWifi.cpp
@@ -119,6 +119,10 @@ endif()
 
 add_subdirectory(teakra EXCLUDE_FROM_ALL)
 target_link_libraries(core teakra)
+
+if (SWITCH)
+	target_sources(core PRIVATE ${CMAKE_SOURCE_DIR}/nds_stub/src/NdsArcDeltaDsiDspStub.cpp)
+endif()
 
 
 if (ENABLE_OGLRENDERER)

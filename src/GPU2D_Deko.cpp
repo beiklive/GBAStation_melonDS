@@ -2,7 +2,10 @@
 #include "GPU.h"
 
 #include <arm_neon.h>
+#include <algorithm>
 #include <assert.h>
+#include <cstdarg>
+#include <stdio.h>
 
 #include "frontend/switch/Gfx.h"
 
@@ -16,19 +19,45 @@ using Gfx::EmuQueue;
 namespace GPU2D
 {
 
+extern "C" void GBAStationNDSStubLogLine(const char* line) __attribute__((weak));
+
+namespace
+{
+
+void DekoLog(const char* format, ...)
+{
+    char line[512] = {};
+    va_list args;
+    va_start(args, format);
+    vsnprintf(line, sizeof(line), format, args);
+    va_end(args);
+
+    if (GBAStationNDSStubLogLine)
+        GBAStationNDSStubLogLine(line);
+    else
+        printf("%s\n", line);
+}
+
+}
+
 DekoRenderer::DekoRenderer() :
     CmdMem(*Gfx::DataHeap, 1024*1024*2)
 {
+    DekoLog("GBAStationNDSStub: GPU2D_Deko ctor begin fb=%dx%d", MaxFramebufferWidth, MaxFramebufferHeight);
     memset(FramebufferReady, 0, sizeof(dk::Fence)*2);
     memset(FramebufferPresented, 0, sizeof(dk::Fence)*2);
 
     dk::ImageLayout finalFbLayout;
     dk::ImageLayoutMaker{Gfx::Device}
-        .setDimensions(256, 192)
+        .setDimensions(MaxFramebufferWidth, MaxFramebufferHeight)
         .setFlags(DkImageFlags_UsageRender)
         .setFormat(DkImageFormat_RGBA8_Unorm)
         .initialize(finalFbLayout);
     FinalFramebufferMemory = Gfx::TextureHeap->Alloc(finalFbLayout.getSize() * 4, finalFbLayout.getAlignment());
+    DekoLog("GBAStationNDSStub: GPU2D_Deko finalFb layoutSize=%llu total=%llu align=%u",
+            static_cast<unsigned long long>(finalFbLayout.getSize()),
+            static_cast<unsigned long long>(finalFbLayout.getSize() * 4),
+            finalFbLayout.getAlignment());
     for (int j = 0; j < 2; j++)
     {
         for (int i = 0; i < 2; i++)
@@ -53,8 +82,26 @@ DekoRenderer::DekoRenderer() :
             IntermedFramebufferMemory.Offset + intermedFbLayout.getSize() * i);
     }
 
-    _3DFramebufferMemory = Gfx::TextureHeap->Alloc(intermedFbLayout.getSize(), intermedFbLayout.getAlignment());
-    _3DFramebuffer.initialize(intermedFbLayout, Gfx::TextureHeap->MemBlock, _3DFramebufferMemory.Offset);
+    dk::ImageLayout hires3DFbLayout;
+    dk::ImageLayoutMaker{Gfx::Device}
+        .setDimensions(MaxFramebufferWidth, MaxFramebufferHeight)
+        .setFlags(DkImageFlags_UsageRender|DkImageFlags_UsageLoadStore|DkImageFlags_Usage2DEngine)
+        .setFormat(DkImageFormat_R32_Uint)
+        .initialize(hires3DFbLayout);
+    _3DFramebufferMemory = Gfx::TextureHeap->Alloc(hires3DFbLayout.getSize(), hires3DFbLayout.getAlignment());
+    _3DFramebuffer.initialize(hires3DFbLayout, Gfx::TextureHeap->MemBlock, _3DFramebufferMemory.Offset);
+    DekoLog("GBAStationNDSStub: GPU2D_Deko 3dFb layoutSize=%llu align=%u",
+            static_cast<unsigned long long>(hires3DFbLayout.getSize()),
+            hires3DFbLayout.getAlignment());
+
+    dk::ImageLayout lowres3DFbLayout;
+    dk::ImageLayoutMaker{Gfx::Device}
+        .setDimensions(256, 192)
+        .setFlags(DkImageFlags_UsageRender|DkImageFlags_UsageLoadStore|DkImageFlags_Usage2DEngine)
+        .setFormat(DkImageFormat_R32_Uint)
+        .initialize(lowres3DFbLayout);
+    _3DFramebufferLowResMemory = Gfx::TextureHeap->Alloc(lowres3DFbLayout.getSize(), lowres3DFbLayout.getAlignment());
+    _3DFramebufferLowRes.initialize(lowres3DFbLayout, Gfx::TextureHeap->MemBlock, _3DFramebufferLowResMemory.Offset);
 
     dk::ImageLayout objWindowLayout;
     dk::ImageLayoutMaker{Gfx::Device}
@@ -211,6 +258,72 @@ DekoRenderer::DekoRenderer() :
         EmuQueue.waitIdle();
         UploadBuf.LastFlushBuffer = 0;
     }
+    DekoLog("GBAStationNDSStub: GPU2D_Deko ctor ok");
+}
+
+void DekoRenderer::SetRenderScale(int scale)
+{
+    scale = std::clamp(scale, 1, MaxRenderScale);
+    if (RenderScale == scale)
+        return;
+    Gfx::EmuQueue.waitIdle();
+    RenderScale = scale;
+    DekoLog("GBAStationNDSStub: GPU2D_Deko render scale=%d framebuffer=%dx%d",
+            RenderScale, GetFramebufferWidth(), GetFramebufferHeight());
+}
+
+void DekoRenderer::RequestFramebufferCapture()
+{
+    FramebufferCaptureRequested = true;
+}
+
+bool DekoRenderer::TakeCapturedFramebufferRGBA(std::vector<u8>& outTop, std::vector<u8>& outBottom)
+{
+    if (CapturedFramebufferTop.empty() || CapturedFramebufferBottom.empty())
+        return false;
+    outTop = CapturedFramebufferTop;
+    outBottom = CapturedFramebufferBottom;
+    CapturedFramebufferTop.clear();
+    CapturedFramebufferBottom.clear();
+    return true;
+}
+
+bool DekoRenderer::ReadFramebufferRGBAFromIndex(int front, std::vector<u8>& outTop, std::vector<u8>& outBottom)
+{
+    front &= 1;
+    const u32 screenBytes = GetFramebufferWidth() * GetFramebufferHeight() * 4;
+    auto readback = Gfx::DataHeap->Alloc(screenBytes * 2, DK_MEMBLOCK_ALIGNMENT);
+
+    CmdMem.Begin(EmuCmdBuf);
+    dk::ImageView topView{FinalFramebuffers[front][0]};
+    dk::ImageView bottomView{FinalFramebuffers[front][1]};
+    EmuCmdBuf.copyImageToBuffer(topView,
+                                {0, 0, 0, (u32)GetFramebufferWidth(), (u32)GetFramebufferHeight(), 1},
+                                {Gfx::DataHeap->GpuAddr(readback)});
+    EmuCmdBuf.copyImageToBuffer(bottomView,
+                                {0, 0, 0, (u32)GetFramebufferWidth(), (u32)GetFramebufferHeight(), 1},
+                                {Gfx::DataHeap->GpuAddr(readback) + screenBytes});
+    EmuQueue.submitCommands(CmdMem.End(EmuCmdBuf));
+    EmuQueue.waitIdle();
+
+    const u8* src = Gfx::DataHeap->CpuAddr<u8>(readback);
+    outTop.assign(src, src + screenBytes);
+    outBottom.assign(src + screenBytes, src + screenBytes * 2);
+    Gfx::DataHeap->Free(readback);
+    return true;
+}
+
+bool DekoRenderer::ReadFramebufferRGBA(std::vector<u8>& outTop, std::vector<u8>& outBottom)
+{
+    if (CmdBufOpen)
+    {
+        DekoLog("GBAStationNDSStub: GPU2D_Deko readback blocked CmdBufOpen=1 vcount=%u front=%d",
+                GPU::VCount,
+                GPU::FrontBuffer);
+        return false;
+    }
+
+    return ReadFramebufferRGBAFromIndex(GPU::FrontBuffer, outTop, outBottom);
 }
 
 DekoRenderer::~DekoRenderer()
@@ -562,7 +675,8 @@ void DekoRenderer::DrawScanline(u32 line, Unit* unit)
     }
 
     if (uploadBarrier)
-        EmuCmdBuf.barrier(DkBarrier_Full, DkInvalidateFlags_Image);
+        EmuCmdBuf.barrier(DkBarrier_Full,
+            DkInvalidateFlags_Image | DkInvalidateFlags_L2Cache);
 
     if (n3dline == 191)
     {
@@ -611,6 +725,16 @@ void DekoRenderer::DrawScanline(u32 line, Unit* unit)
                 /*DkResult result = */DisplayCaptureFence.wait();
                 //printf("wait result %d %fms\n", result, armTicksToNs(armGetSystemTick()-startTime)*0.000001f);
                 DoCapture();
+            }
+
+            if (FramebufferCaptureRequested)
+            {
+                FramebufferCaptureRequested = false;
+                const int completedFront = GPU::FrontBuffer ^ 1;
+                if (ReadFramebufferRGBAFromIndex(completedFront, CapturedFramebufferTop, CapturedFramebufferBottom))
+                    DekoLog("GBAStationNDSStub: GPU2D_Deko deferred capture ok front=%d", completedFront);
+                else
+                    DekoLog("GBAStationNDSStub: GPU2D_Deko deferred capture failed front=%d", completedFront);
             }
         }
     }
@@ -662,7 +786,8 @@ void DekoRenderer::DrawSprites(u32 line, Unit* unit)
     }
 
     if (uploadBarrier)
-        EmuCmdBuf.barrier(DkBarrier_Full, DkInvalidateFlags_Image);
+        EmuCmdBuf.barrier(DkBarrier_Full,
+            DkInvalidateFlags_Image | DkInvalidateFlags_L2Cache);
 
     if (oamDirty)
     {
@@ -706,7 +831,7 @@ void DekoRenderer::DoCapture()
 
     u8* srcA = Gfx::DataHeap->CpuAddr<u8>(DisplayCaptureMemory);
 
-    u32 srcBaddr;
+    u32 srcBaddr = 0;
     u16* srcB = NULL;
 
     if (CaptureCnt & (1<<25))
@@ -880,8 +1005,8 @@ void DekoRenderer::DoCapture()
                         uint16x8_t finalBHi = vmull_high_u8(pixelsA.val[2], veva);
 
                         uint8x16_t finalR = vshrn_high_n_u16(vshrn_n_u16(finalRLo, 4), finalRHi, 4);
-                        uint8x16_t finalG = vshrn_high_n_u16(vshrn_n_u16(finalRLo, 4), finalGHi, 4);
-                        uint8x16_t finalB = vshrn_high_n_u16(vshrn_n_u16(finalRLo, 4), finalBHi, 4);
+                        uint8x16_t finalG = vshrn_high_n_u16(vshrn_n_u16(finalGLo, 4), finalGHi, 4);
+                        uint8x16_t finalB = vshrn_high_n_u16(vshrn_n_u16(finalBLo, 4), finalBHi, 4);
 
                         uint8x16_t alpha = vandq_u8(evaMask, vtstq_u8(pixelsA.val[3], pixelsA.val[3]));
 
@@ -1840,9 +1965,23 @@ void DekoRenderer::FlushBGDraw(u32 curline, u32 bgmask)
 void DekoRenderer::ComposeBGOBJ()
 {
     dk::ImageView colorTarget{FinalFramebuffers[GPU::FrontBuffer^1][CurUnit->Num == UnitAIsTop]};
-    dk::Shader* shader;
     bool capture = CurUnit->Num == 0 && CaptureLatch && !(CaptureCnt & (1<<24));
+    static u32 composeLogCount = 0;
+    if (composeLogCount < 24 || (composeLogCount % 240) == 0)
+    {
+        DekoLog("GBAStationNDSStub: GPU2D_Deko compose begin seq=%u unit=%d capture=%d regions=%u fb=%dx%d",
+                composeLogCount,
+                CurUnit->Num,
+                capture ? 1 : 0,
+                static_cast<unsigned>(ComposeRegions[CurUnit->Num].size()),
+                GetFramebufferWidth(),
+                GetFramebufferHeight());
+    }
+    ++composeLogCount;
     EmuCmdBuf.bindVtxAttribState({});
+
+    DkViewport composeViewport = {0.f, 0.f, (float)GetFramebufferWidth(), (float)GetFramebufferHeight(), 0.f, 1.f};
+    EmuCmdBuf.setViewports(0, {composeViewport, composeViewport});
 
     EmuCmdBuf.bindTextures(DkStage_Fragment, 5,
     {
@@ -1884,29 +2023,13 @@ void DekoRenderer::ComposeBGOBJ()
         }
         if (region.StdPalSize || region.BGExtPalSize || region.OBJExtPalSize)
         {
-            EmuCmdBuf.barrier(DkBarrier_Full, DkInvalidateFlags_Image);
+            EmuCmdBuf.barrier(DkBarrier_Full,
+                DkInvalidateFlags_Image | DkInvalidateFlags_L2Cache);
         }
 
         u32 dispmode = region.DispCnt >> 16;
         dispmode &= (CurUnit->Num ? 0x1 : 0x3);
         bool showDirectBitmap = dispmode != 1 || (CurUnit->DispCnt & (1<<7)) || region.ForceBlank;
-
-        if (capture)
-        {
-            dk::ImageView bgobj{BGOBJTexture};
-            EmuCmdBuf.bindRenderTargets({&colorTarget, &bgobj});
-            shader = showDirectBitmap ? &ShaderComposeBGOBJShowBitmap : &ShaderComposeBGOBJ;
-        }
-        else
-        {
-            EmuCmdBuf.bindRenderTargets({&colorTarget});
-            shader = showDirectBitmap ? &ShaderComposeBGOBJDirectBitmapOnly : &ShaderComposeBGOBJ;
-        }
-        EmuCmdBuf.bindShaders(DkStageFlag_GraphicsMask, {&ShaderFullscreenQuad, shader});
-
-        DkScissor scissor = {0, firstLine, 256, region.LinesCount};
-        EmuCmdBuf.setScissors(0, {scissor, scissor});
-        //printf("compositing region %d %d\n", firstLine, region.LinesCount);
 
         u32 bgOrder[4];
         int n = 0;
@@ -1916,6 +2039,9 @@ void DekoRenderer::ComposeBGOBJ()
                     bgOrder[n++] = j;
 
         ComposeUniform& composeUniform = ComposeUniforms[CurUnit->Num];
+        composeUniform.ThreeDScale = RenderScale;
+        composeUniform.OutputScale = RenderScale;
+        composeUniform.ThreeDLayerMask = 0;
         int textureHandleIdx[4];
 
         for (int i = 0; i < 4; i++)
@@ -1944,6 +2070,7 @@ void DekoRenderer::ComposeBGOBJ()
             else if (bgOrder[i] == 0 && CurUnit->Num == 0 && region.DispCnt & (1<<3))
             {
                 textureHandleIdx[i] = descriptorOffset_3DFramebuffer;
+                composeUniform.ThreeDLayerMask |= 1U << i;
             }
             else
             {
@@ -1983,37 +2110,58 @@ void DekoRenderer::ComposeBGOBJ()
             0, sizeof(ComposeUniform)-sizeof(composeUniform.Window),
             &composeUniform);
 
+        if (capture)
+        {
+            composeUniform.OutputScale = 1;
+            EmuCmdBuf.pushConstants(Gfx::DataHeap->GpuAddr(ComposeUniformMemory), ComposeUniformSize,
+                offsetof(ComposeUniform, OutputScale), sizeof(composeUniform.OutputScale),
+                &composeUniform.OutputScale);
+            dk::ImageView bgobj{BGOBJTexture};
+            dk::Shader* captureShader = showDirectBitmap ? &ShaderComposeBGOBJShowBitmap : &ShaderComposeBGOBJ;
+            DkViewport nativeCaptureViewport = {0.f, 0.f, 256.f, 192.f, 0.f, 1.f};
+            EmuCmdBuf.setViewports(0, {nativeCaptureViewport, nativeCaptureViewport});
+            EmuCmdBuf.bindRenderTargets({&colorTarget, &bgobj});
+            EmuCmdBuf.bindShaders(DkStageFlag_GraphicsMask, {&ShaderFullscreenQuad, captureShader});
+            DkScissor nativeScissor = {0, firstLine, 256, region.LinesCount};
+            EmuCmdBuf.setScissors(0, {nativeScissor, nativeScissor});
+            EmuCmdBuf.draw(DkPrimitive_TriangleStrip, 4, 1, 0, 0);
+        }
+
+        EmuCmdBuf.bindRenderTargets({&colorTarget});
+        composeUniform.OutputScale = RenderScale;
+        EmuCmdBuf.pushConstants(Gfx::DataHeap->GpuAddr(ComposeUniformMemory), ComposeUniformSize,
+            offsetof(ComposeUniform, OutputScale), sizeof(composeUniform.OutputScale),
+            &composeUniform.OutputScale);
+        dk::Shader* shader = showDirectBitmap ? &ShaderComposeBGOBJDirectBitmapOnly : &ShaderComposeBGOBJ;
+        if (capture)
+            shader = showDirectBitmap ? &ShaderComposeBGOBJShowBitmap : &ShaderComposeBGOBJ;
+        EmuCmdBuf.bindShaders(DkStageFlag_GraphicsMask, {&ShaderFullscreenQuad, shader});
+
+        DkViewport displayViewport = {0.f, 0.f, (float)GetFramebufferWidth(), (float)GetFramebufferHeight(), 0.f, 1.f};
+        EmuCmdBuf.setViewports(0, {displayViewport, displayViewport});
+        DkScissor scissor = {0, firstLine * (u32)RenderScale,
+                             (u32)GetFramebufferWidth(), region.LinesCount * (u32)RenderScale};
+        EmuCmdBuf.setScissors(0, {scissor, scissor});
         EmuCmdBuf.draw(DkPrimitive_TriangleStrip, 4, 1, 0, 0);
 
         firstLine += region.LinesCount;
     }
     assert(firstLine == 192);
 
+    DkViewport nativeViewport = {0.f, 0.f, 256.f, 192.f, 0.f, 1.f};
+    EmuCmdBuf.setViewports(0, {nativeViewport, nativeViewport});
+
     ComposeRegions[CurUnit->Num].clear();
 
     EmuCmdBuf.barrier(DkBarrier_Fragments, DkInvalidateFlags_Image);
 
-    for (int i = 0; i < 5; i++)
-    {
-        if (BGOBJRedrawn[CurUnit->Num] & (1 << i))
-        {
-            dk::ImageView colorTarget{IntermedFramebuffers[fb_Count * CurUnit->Num + fb_BG0 + i]};
-            EmuCmdBuf.bindRenderTargets({&colorTarget});
-            EmuCmdBuf.discardColor(0);
-        }
-    }
-    if (BGOBJRedrawn[CurUnit->Num] & (1 << 5))
-    {
-        dk::ImageView colorTarget{OBJWindow[CurUnit->Num]};
-        EmuCmdBuf.bindRenderTargets({&colorTarget});
-        EmuCmdBuf.discardColor(0);
-    }
-
+    // Unchanged BG/OBJ batches are reused across frames. Discarding these
+    // images makes the next skipped batch sample undefined tile contents.
     BGOBJRedrawn[CurUnit->Num] = 0;
 
     if (CurUnit->Num == 0 && CaptureLatch)
     {
-        dk::ImageView src{CaptureCnt & (1<<24) ? _3DFramebuffer : BGOBJTexture};
+        dk::ImageView src{CaptureCnt & (1<<24) ? _3DFramebufferLowRes : BGOBJTexture};
         EmuCmdBuf.copyImageToBuffer(src, {0, 0, 0, 256, 192, 1}, {Gfx::DataHeap->GpuAddr(DisplayCaptureMemory)});
         EmuCmdBuf.signalFence(DisplayCaptureFence, true);
     }

@@ -13,6 +13,8 @@ cmake-build-debug
 
 *.exe
 
+build_*
+
 .DS_Store
 .vscode/settings.json
 build_script.sh
