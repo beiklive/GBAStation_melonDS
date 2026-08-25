@@ -18,6 +18,7 @@
 #cmakedefine WBuffer
 
 #define NDS_3D_SCALE @NDS_3D_SCALE@
+#cmakedefine Legacy
 
 // for Rasterise
 #cmakedefine NoTexture
@@ -155,9 +156,7 @@ buffer BinResultBuffer
 };
 
 #if defined(Rasterise) || defined(DepthBlend)
-const int TilePixelCount = MaxWorkTiles*TileSize*TileSize;
-const int TilePlaneHalf = TilePixelCount/2;
-
+#if defined(Legacy)
 layout (std430, binding = 4)
 #ifdef Rasterise
 writeonly
@@ -165,10 +164,23 @@ writeonly
 #ifdef DepthBlend
 readonly
 #endif
-buffer ColorTilesLowBuffer
+buffer TilesBuffer
 {
-    uint ColorTilesLow[TilePlaneHalf];
+    uint ColorTiles[MaxWorkTiles*TileSize*TileSize];
+    uint DepthTiles[MaxWorkTiles*TileSize*TileSize];
+    uint AttrTiles[MaxWorkTiles*TileSize*TileSize];
 };
+#else
+const int TilePixelCount = MaxWorkTiles*TileSize*TileSize;
+const int TilePlaneHalf = TilePixelCount/2;
+layout (std430, binding = 4)
+#ifdef Rasterise
+writeonly
+#endif
+#ifdef DepthBlend
+readonly
+#endif
+buffer ColorTilesLowBuffer { uint ColorTilesLow[TilePlaneHalf]; };
 layout (std430, binding = 5)
 #ifdef Rasterise
 writeonly
@@ -176,10 +188,7 @@ writeonly
 #ifdef DepthBlend
 readonly
 #endif
-buffer ColorTilesHighBuffer
-{
-    uint ColorTilesHigh[TilePlaneHalf];
-};
+buffer ColorTilesHighBuffer { uint ColorTilesHigh[TilePlaneHalf]; };
 layout (std430, binding = 6)
 #ifdef Rasterise
 writeonly
@@ -187,10 +196,7 @@ writeonly
 #ifdef DepthBlend
 readonly
 #endif
-buffer DepthTilesLowBuffer
-{
-    uint DepthTilesLow[TilePlaneHalf];
-};
+buffer DepthTilesLowBuffer { uint DepthTilesLow[TilePlaneHalf]; };
 layout (std430, binding = 7)
 #ifdef Rasterise
 writeonly
@@ -198,10 +204,7 @@ writeonly
 #ifdef DepthBlend
 readonly
 #endif
-buffer DepthTilesHighBuffer
-{
-    uint DepthTilesHigh[TilePlaneHalf];
-};
+buffer DepthTilesHighBuffer { uint DepthTilesHigh[TilePlaneHalf]; };
 layout (std430, binding = 8)
 #ifdef Rasterise
 writeonly
@@ -209,10 +212,7 @@ writeonly
 #ifdef DepthBlend
 readonly
 #endif
-buffer AttrTilesLowBuffer
-{
-    uint AttrTilesLow[TilePlaneHalf];
-};
+buffer AttrTilesLowBuffer { uint AttrTilesLow[TilePlaneHalf]; };
 layout (std430, binding = 9)
 #ifdef Rasterise
 writeonly
@@ -220,13 +220,15 @@ writeonly
 #ifdef DepthBlend
 readonly
 #endif
-buffer AttrTilesHighBuffer
-{
-    uint AttrTilesHigh[TilePlaneHalf];
-};
+buffer AttrTilesHighBuffer { uint AttrTilesHigh[TilePlaneHalf]; };
+#endif
 #endif
 
+#if defined(Legacy)
+layout (std430, binding = 5)
+#else
 layout (std430, binding = 10)
+#endif
 #ifdef DepthBlend
 writeonly
 #endif
@@ -243,32 +245,56 @@ buffer RasterResult
 #ifdef Rasterise
 void StoreColorTile(int index, uint value)
 {
+#if defined(Legacy)
+    ColorTiles[index] = value;
+#else
     if (index < TilePlaneHalf) ColorTilesLow[index] = value;
     else ColorTilesHigh[index-TilePlaneHalf] = value;
+#endif
 }
 void StoreDepthTile(int index, uint value)
 {
+#if defined(Legacy)
+    DepthTiles[index] = value;
+#else
     if (index < TilePlaneHalf) DepthTilesLow[index] = value;
     else DepthTilesHigh[index-TilePlaneHalf] = value;
+#endif
 }
 void StoreAttrTile(int index, uint value)
 {
+#if defined(Legacy)
+    AttrTiles[index] = value;
+#else
     if (index < TilePlaneHalf) AttrTilesLow[index] = value;
     else AttrTilesHigh[index-TilePlaneHalf] = value;
+#endif
 }
 #endif
 #ifdef DepthBlend
 uint LoadColorTile(uint index)
 {
+#if defined(Legacy)
+    return ColorTiles[index];
+#else
     return index < uint(TilePlaneHalf) ? ColorTilesLow[index] : ColorTilesHigh[index-uint(TilePlaneHalf)];
+#endif
 }
 uint LoadDepthTile(uint index)
 {
+#if defined(Legacy)
+    return DepthTiles[index];
+#else
     return index < uint(TilePlaneHalf) ? DepthTilesLow[index] : DepthTilesHigh[index-uint(TilePlaneHalf)];
+#endif
 }
 uint LoadAttrTile(uint index)
 {
+#if defined(Legacy)
+    return AttrTiles[index];
+#else
     return index < uint(TilePlaneHalf) ? AttrTilesLow[index] : AttrTilesHigh[index-uint(TilePlaneHalf)];
+#endif
 }
 #endif
 
@@ -394,13 +420,9 @@ int CalcYFactorY(YSpanSetup span, int i)
              + uint(abs(span.I1 - span.I0 - i)) * uint(span.W1d);
 
     if (den == 0)
-    {
         return 0;
-    }
     else
-    {
         return int(Div64_32_32(numHi, numLo, den));
-    }
 }
 
 int CalcYFactorX(XSpanSetup span, int x)
@@ -413,7 +435,6 @@ int CalcYFactorX(XSpanSetup span, int x)
         uint numHi = numLo >> (32U - uint(Shift));
         numLo <<= uint(Shift);
         uint den = (uint(x) * span.W0) + (uint(span.X1 - span.X0 - x) * span.W1);
-
         if (den == 0)
             return 0;
         else
@@ -1421,7 +1442,9 @@ void main()
 layout (local_size_x = 32) in;
 
 layout (binding = 0, r32ui) writeonly uniform uimage2D FinalFB; 
+#ifndef Legacy
 layout (binding = 1, r32ui) writeonly uniform uimage2D LowResFB;
+#endif
 
 uint BlendFog(uint color, uint depth)
 {
@@ -1468,7 +1491,11 @@ uint BlendFog(uint color, uint depth)
 
 void main()
 {
+    #ifdef Legacy
+    int srcX = (int(gl_GlobalInvocationID.x) + XScroll) & 0x1FF;
+    #else
     int srcX = (int(gl_GlobalInvocationID.x) + XScroll * NDS_3D_SCALE) % (512 * NDS_3D_SCALE);
+    #endif
     int resultOffset = int(srcX) + int(gl_GlobalInvocationID.y) * ScreenWidth;
 
     uvec2 color = uvec2(0);
@@ -1584,9 +1611,11 @@ void main()
         //color.x = 0x1F00001FU | 0x40000000U;
 
     imageStore(FinalFB, ivec2(gl_GlobalInvocationID.xy), uvec4(color.x, 0, 0, 0));
+#ifndef Legacy
     ivec2 highresPosition = ivec2(gl_GlobalInvocationID.xy);
     if (all(equal(highresPosition % NDS_3D_SCALE, ivec2(0))))
         imageStore(LowResFB, highresPosition / NDS_3D_SCALE, uvec4(color.x, 0, 0, 0));
+#endif
 }
 
 #endif

@@ -26,6 +26,19 @@ u32 stupidTextureNum = 0;
 namespace GPU3D
 {
 
+// Diagnostic switch: when enabled, existing texture layers are never
+// invalidated/reused.  This intentionally freezes animated textures, but it
+// isolates cache-layer corruption from UV/tile decoding errors.
+static constexpr bool DebugFreezeTextureCache = false;
+// Diagnostic path: read the common 4bpp texture format directly through the
+// current DS VRAM mapping instead of the VRAMFlat_Texture mirror.
+static constexpr bool DebugDirectFmt3VRAMRead = false;
+// Temporary diagnostic: force the 3D path to draw polygons without sampling
+// textures.  If tile scrambling disappears with this enabled, the fault is
+// in texture/UV/layer handling; if it remains, inspect span/raster setup.
+// Revert to false after collecting the diagnostic result.
+static constexpr bool DebugDisable3DTextures = false;
+
 extern "C" void GBAStationNDSStubLogLine(const char* line) __attribute__((weak));
 
 namespace
@@ -43,6 +56,21 @@ void DekoLog(const char* format, ...)
         GBAStationNDSStubLogLine(line);
     else
         printf("%s\n", line);
+
+    // Keep a persistent log on the SD card for Switch builds without nxlink.
+    // Logging must never interfere with startup if the path is unavailable.
+    static FILE* logFile = nullptr;
+    static bool logInit = false;
+    if (!logInit)
+    {
+        logInit = true;
+        logFile = fopen("sdmc:/switch/melonds/deko.log", "w");
+    }
+    if (logFile)
+    {
+        fprintf(logFile, "%s\n", line);
+        fflush(logFile);
+    }
 }
 
 }
@@ -57,7 +85,7 @@ DekoRenderer::DekoRenderer()
 DekoRenderer::~DekoRenderer()
 {}
 
-void DekoRenderer::LoadShaders(int scale)
+bool DekoRenderer::LoadShaders(int scale)
 {
     static const char* zBufferNames[] = {
         "InterpXSpansZBuffer", "BinCombined", "DepthBlendZBuffer",
@@ -72,46 +100,55 @@ void DekoRenderer::LoadShaders(int scale)
         "FinalPass", "FinalPassEdge", "FinalPassFog", "FinalPassEdgeFog",
         "FinalPassAA", "FinalPassEdgeAA", "FinalPassFogAA", "FinalPassEdgeFogAA"
     };
-    auto load = [](const char* base, int scale, dk::Shader& shader) {
-        char path[128];
-        snprintf(path, sizeof(path), "romfs:/shaders/%s_x%d.dksh", base, scale);
-        Gfx::LoadShader(path, shader);
-    };
     scale = std::clamp(scale, 1, MaxScaleFactor);
     const int s = scale - 1;
     if (ShaderScaleLoaded[s])
-        return;
+        return true;
 
-    DekoLog("GBAStationNDSStub: GPU3D_Deko shader scale load begin scale=%d", scale);
-    load("InterpXSpansZBuffer", scale, ShaderInterpXSpans[s][0]);
-    load("InterpXSpansWBuffer", scale, ShaderInterpXSpans[s][1]);
-    load("BinCombined", scale, ShaderBinCombined[s]);
-    load("DepthBlendZBuffer", scale, ShaderDepthBlend[s][0]);
-    load("DepthBlendWBuffer", scale, ShaderDepthBlend[s][1]);
-    load("RasteriseNoTextureZBuffer", scale, ShaderRasteriseNoTexture[s][0]);
-    load("RasteriseNoTextureZBufferToon", scale, ShaderRasteriseNoTextureToon[s][0]);
-    load("RasteriseNoTextureZBufferHighlight", scale, ShaderRasteriseNoTextureHighlight[s][0]);
-    load("RasteriseUseTextureDecalZBuffer", scale, ShaderRasteriseUseTextureDecal[s][0]);
-    load("RasteriseUseTextureModulateZBuffer", scale, ShaderRasteriseUseTextureModulate[s][0]);
-    load("RasteriseUseTextureToonZBuffer", scale, ShaderRasteriseUseTextureToon[s][0]);
-    load("RasteriseUseTextureHighlightZBuffer", scale, ShaderRasteriseUseTextureHighlight[s][0]);
-    load("RasteriseShadowMaskZBuffer", scale, ShaderRasteriseShadowMask[s][0]);
-    load("RasteriseNoTextureWBuffer", scale, ShaderRasteriseNoTexture[s][1]);
-    load("RasteriseNoTextureWBufferToon", scale, ShaderRasteriseNoTextureToon[s][1]);
-    load("RasteriseNoTextureWBufferHighlight", scale, ShaderRasteriseNoTextureHighlight[s][1]);
-    load("RasteriseUseTextureDecalWBuffer", scale, ShaderRasteriseUseTextureDecal[s][1]);
-    load("RasteriseUseTextureModulateWBuffer", scale, ShaderRasteriseUseTextureModulate[s][1]);
-    load("RasteriseUseTextureToonWBuffer", scale, ShaderRasteriseUseTextureToon[s][1]);
-    load("RasteriseUseTextureHighlightWBuffer", scale, ShaderRasteriseUseTextureHighlight[s][1]);
-    load("RasteriseShadowMaskWBuffer", scale, ShaderRasteriseShadowMask[s][1]);
-    load("ClearCoarseBinMask", scale, ShaderClearCoarseBinMask[s]);
-    load("ClearIndirectWorkCount", scale, ShaderClearIndirectWorkCount[s]);
-    load("CalculateWorkOffsets", scale, ShaderCalculateWorkListOffset[s]);
-    load("SortWork", scale, ShaderSortWork[s]);
+    DekoLog("GBAStationNDSStub: GPU3D_Deko shader scale load begin scale=%d nativeLegacy=0",
+            scale);
+    bool ok = true;
+    auto checkedLoad = [&](const char* base, dk::Shader& shader) {
+        char path[128];
+        snprintf(path, sizeof(path), "romfs:/shaders/%s_x%d.dksh", base, scale);
+        if (!Gfx::LoadShader(path, shader))
+        {
+            DekoLog("GBAStationNDSStub: GPU3D_Deko shader load FAILED path=%s", path);
+            ok = false;
+        }
+    };
+    checkedLoad("InterpXSpansZBuffer", ShaderInterpXSpans[s][0]);
+    checkedLoad("InterpXSpansWBuffer", ShaderInterpXSpans[s][1]);
+    checkedLoad("BinCombined", ShaderBinCombined[s]);
+    checkedLoad("DepthBlendZBuffer", ShaderDepthBlend[s][0]);
+    checkedLoad("DepthBlendWBuffer", ShaderDepthBlend[s][1]);
+    checkedLoad("RasteriseNoTextureZBuffer", ShaderRasteriseNoTexture[s][0]);
+    checkedLoad("RasteriseNoTextureZBufferToon", ShaderRasteriseNoTextureToon[s][0]);
+    checkedLoad("RasteriseNoTextureZBufferHighlight", ShaderRasteriseNoTextureHighlight[s][0]);
+    checkedLoad("RasteriseUseTextureDecalZBuffer", ShaderRasteriseUseTextureDecal[s][0]);
+    checkedLoad("RasteriseUseTextureModulateZBuffer", ShaderRasteriseUseTextureModulate[s][0]);
+    checkedLoad("RasteriseUseTextureToonZBuffer", ShaderRasteriseUseTextureToon[s][0]);
+    checkedLoad("RasteriseUseTextureHighlightZBuffer", ShaderRasteriseUseTextureHighlight[s][0]);
+    checkedLoad("RasteriseShadowMaskZBuffer", ShaderRasteriseShadowMask[s][0]);
+    checkedLoad("RasteriseNoTextureWBuffer", ShaderRasteriseNoTexture[s][1]);
+    checkedLoad("RasteriseNoTextureWBufferToon", ShaderRasteriseNoTextureToon[s][1]);
+    checkedLoad("RasteriseNoTextureWBufferHighlight", ShaderRasteriseNoTextureHighlight[s][1]);
+    checkedLoad("RasteriseUseTextureDecalWBuffer", ShaderRasteriseUseTextureDecal[s][1]);
+    checkedLoad("RasteriseUseTextureModulateWBuffer", ShaderRasteriseUseTextureModulate[s][1]);
+    checkedLoad("RasteriseUseTextureToonWBuffer", ShaderRasteriseUseTextureToon[s][1]);
+    checkedLoad("RasteriseUseTextureHighlightWBuffer", ShaderRasteriseUseTextureHighlight[s][1]);
+    checkedLoad("RasteriseShadowMaskWBuffer", ShaderRasteriseShadowMask[s][1]);
+    checkedLoad("ClearCoarseBinMask", ShaderClearCoarseBinMask[s]);
+    checkedLoad("ClearIndirectWorkCount", ShaderClearIndirectWorkCount[s]);
+    checkedLoad("CalculateWorkOffsets", ShaderCalculateWorkListOffset[s]);
+    checkedLoad("SortWork", ShaderSortWork[s]);
     for (int i = 0; i < 8; ++i)
-        load(finalNames[i], scale, ShaderFinalPass[s][i]);
+        checkedLoad(finalNames[i], ShaderFinalPass[s][i]);
+    if (!ok)
+        return false;
     ShaderScaleLoaded[s] = true;
     DekoLog("GBAStationNDSStub: GPU3D_Deko shader scale load ok scale=%d", scale);
+    return true;
 }
 
 std::size_t DekoRenderer::SortWorkWorkCountOffset() const
@@ -156,12 +193,13 @@ void DekoRenderer::FreeScaleResources()
     DekoLog("GBAStationNDSStub: GPU3D_Deko scale free ok scale=%d", ScaleFactor);
 }
 
-void DekoRenderer::AllocateScaleResources(int scale)
+bool DekoRenderer::AllocateScaleResources(int scale)
 {
     scale = std::clamp(scale, 1, MaxScaleFactor);
     if (ScaleResourcesAllocated && scale == ScaleFactor)
-        return;
-    LoadShaders(scale);
+        return true;
+    if (!LoadShaders(scale))
+        return false;
     Gfx::EmuQueue.waitIdle();
     FreeScaleResources();
 
@@ -234,16 +272,25 @@ void DekoRenderer::AllocateScaleResources(int scale)
     DekoLog("GBAStationNDSStub: GPU3D_Deko scale=%d screen=%dx%d dataMB=%.1f",
             ScaleFactor, ScreenWidth, ScreenHeight,
             static_cast<double>(TilesSize() + BinResultSize() + FinalTilesSize()) / (1024.0 * 1024.0));
+    return true;
 }
 
 bool DekoRenderer::Init()
 {
     DekoLog("GBAStationNDSStub: GPU3D_Deko init begin");
+    DekoLog("GBAStationNDSStub: GPU3D_Deko texture cache freeze=%d",
+            DebugFreezeTextureCache ? 1 : 0);
+    DekoLog("GBAStationNDSStub: GPU3D_Deko tileBuffer=split-normal-shaders");
     DekoLog("GBAStationNDSStub: GPU3D_Deko LoadShaders begin");
-    LoadShaders(1);
+    if (!LoadShaders(1))
+    {
+        DekoLog("GBAStationNDSStub: GPU3D_Deko LoadShaders FAILED");
+        return false;
+    }
     DekoLog("GBAStationNDSStub: GPU3D_Deko LoadShaders ok");
     DekoLog("GBAStationNDSStub: GPU3D_Deko AllocateScaleResources begin scale=1");
-    AllocateScaleResources(1);
+    if (!AllocateScaleResources(1))
+        return false;
     DekoLog("GBAStationNDSStub: GPU3D_Deko AllocateScaleResources ok scale=1");
 
     {
@@ -304,7 +351,11 @@ void DekoRenderer::Reset()
 void DekoRenderer::SetRenderSettings(GPU::RenderSettings& settings)
 {
     BetterPolygons = settings.GL_BetterPolygons;
-    AllocateScaleResources(settings.GL_ScaleFactor);
+    DekoLog("GBAStationNDSStub: GPU3D_Deko render settings scale=%d betterPolygons=%d effectiveHires=%d",
+            settings.GL_ScaleFactor, BetterPolygons ? 1 : 0,
+            (BetterPolygons && settings.GL_ScaleFactor > 1) ? 1 : 0);
+    if (!AllocateScaleResources(settings.GL_ScaleFactor))
+        DekoLog("GBAStationNDSStub: GPU3D_Deko render settings shader allocation FAILED");
 }
 
 void DekoRenderer::VCount144()
@@ -802,6 +853,27 @@ void ConvertNColorsTexture(u32 width, u32 height, u32* output,
     }
 }
 
+static void Convert16ColorsTextureDirectVRAM(u32 width, u32 height, u32* output,
+    u32 texAddr, u32 palAddr, bool color0Transparent)
+{
+    const u32 rowBytes = width / 2;
+    for (u32 y = 0; y < height; y++)
+    {
+        for (u32 xByte = 0; xByte < rowBytes; xByte++)
+        {
+            const u8 packed = GPU::ReadVRAM_Texture<u8>(texAddr + y * rowBytes + xByte);
+            for (u32 nibble = 0; nibble < 2; nibble++)
+            {
+                const u32 index = (packed >> (nibble * 4)) & 0xF;
+                const u16 color = GPU::ReadVRAM_TexPal<u16>(palAddr + index * 2);
+                const bool transparent = color0Transparent && index == 0;
+                output[y * width + xByte * 2 + nibble] =
+                    ConvertRGB5ToRGB6(color) | (transparent ? 0 : 0x1F000000);
+            }
+        }
+    }
+}
+
 static u64 MaskedVRAMHash(const u8* vram, u32 vramSize, u32 addr, u32 size)
 {
     u64 hash = 0;
@@ -832,6 +904,9 @@ static bool CheckVRAMRangeInvalid(u32 start, u32 size, u64 oldHash,
     {
         if (GetRangedBitMask(j, startBit, bitsCount) & dirty[j & dirtyEntryMask])
         {
+            // Dirty bits are page-granular.  Recheck the covered bytes before
+            // recycling the texture layer; unrelated writes in the same page
+            // must not force a layer to be replaced every frame.
             return MaskedVRAMHash(vram, vramSize, start, size) != oldHash;
         }
     }
@@ -859,7 +934,17 @@ DekoRenderer::TexCacheEntry& DekoRenderer::GetTexture(u32 texParam, u32 palBase)
     auto it = TexCache.find(key);
 
     if (it != TexCache.end())
+    {
+        static u32 textureHitLogCount = 0;
+        if (textureHitLogCount < 32)
+        {
+            DekoLog("GBAStationNDSStub: texture cache hit key=%llu fmt=%u addr=%u pal=%u desc=%u layer=%u",
+                    static_cast<unsigned long long>(key), fmt, (texParam & 0xFFFF) * 8,
+                    palBase, it->second.DescriptorIdx, it->second.Texture.LayerIdx);
+            textureHitLogCount++;
+        }
         return it->second;
+    }
 
     u32 widthLog2 = (texParam >> 20) & 0x7;
     u32 heightLog2 = (texParam >> 23) & 0x7;
@@ -930,7 +1015,30 @@ DekoRenderer::TexCacheEntry& DekoRenderer::GetTexture(u32 texParam, u32 palBase)
         case 1: ConvertAXIYTexture<outputFmt_RGB6A5, 3, 5>(width, height, TextureDecodingBuffer, addr, palAddr); break;
         case 6: ConvertAXIYTexture<outputFmt_RGB6A5, 5, 3>(width, height, TextureDecodingBuffer, addr, palAddr); break;
         case 2: ConvertNColorsTexture<outputFmt_RGB6A5, 2>(width, height, TextureDecodingBuffer, addr, palAddr, color0Transparent); break;
-        case 3: ConvertNColorsTexture<outputFmt_RGB6A5, 4>(width, height, TextureDecodingBuffer, addr, palAddr, color0Transparent); break;
+        case 3:
+            // fmt3 is the common 4bpp character texture format.  Keep the
+            // original NEON unpacker for the native path; the scalar
+            // replacement changed the nibble/tile ordering on Switch.
+            if (DebugDirectFmt3VRAMRead)
+            {
+                static bool directFmt3Log = false;
+                if (!directFmt3Log)
+                {
+                    DekoLog("GBAStationNDSStub: fmt3 decoder=direct-vram");
+                    directFmt3Log = true;
+                }
+                Convert16ColorsTextureDirectVRAM(width, height, TextureDecodingBuffer,
+                    addr, palAddr, color0Transparent);
+            }
+            else
+            {
+                // Preserve the original scalar decoder for the normal path.
+                // The NEON unpacker uses a different write grouping and can
+                // reorder 4bpp pixels when a texture is refreshed.
+                ConvertNColorsTexture<outputFmt_RGB6A5, 4>(width, height,
+                    TextureDecodingBuffer, addr, palAddr, color0Transparent);
+            }
+            break;
         case 4: ConvertNColorsTexture<outputFmt_RGB6A5, 8>(width, height, TextureDecodingBuffer, addr, palAddr, color0Transparent); break;
         }
     }
@@ -999,6 +1107,15 @@ DekoRenderer::TexCacheEntry& DekoRenderer::GetTexture(u32 texParam, u32 palBase)
     entry.DescriptorIdx = array.ImageDescriptor;
     entry.Texture = storagePlace;
 
+    static u32 textureCreateLogCount = 0;
+    if (textureCreateLogCount < 64)
+    {
+        DekoLog("GBAStationNDSStub: texture cache new key=%llu fmt=%u size=%ux%u addr=%u pal=%u desc=%u layer=%u",
+                static_cast<unsigned long long>(key), fmt, width, height, addr, palBase,
+                entry.DescriptorIdx, entry.Texture.LayerIdx);
+        textureCreateLogCount++;
+    }
+
     return TexCache.emplace(std::make_pair(key, entry)).first->second;
 }
 
@@ -1036,8 +1153,9 @@ void DekoRenderer::RenderFrame()
 
     bool textureChanged = GPU::MakeVRAMFlat_TextureCoherent(textureDirty);
     bool texPalChanged = GPU::MakeVRAMFlat_TexPalCoherent(texPalDirty);
+    bool textureLayerRecycled = false;
 
-    if (textureChanged || texPalChanged)
+    if ((textureChanged || texPalChanged) && !DebugFreezeTextureCache)
     {
         //printf("check invalidation %d\n", TexCache.size());
         for (auto it = TexCache.begin(); it != TexCache.end();)
@@ -1065,14 +1183,32 @@ void DekoRenderer::RenderFrame()
             it++;
             continue;
         invalidate:
+            static u32 textureInvalidateLogCount = 0;
+            if (textureInvalidateLogCount < 32)
+            {
+                DekoLog("GBAStationNDSStub: texture cache invalidate key=%llu desc=%u layer=%u",
+                        static_cast<unsigned long long>(it->first),
+                        entry.DescriptorIdx, entry.Texture.LayerIdx);
+                textureInvalidateLogCount++;
+            }
             FreeTextures[entry.WidthLog2][entry.HeightLog2].push_back(entry.Texture);
+            textureLayerRecycled = true;
 
             //printf("invalidating texture %d\n", entry.ImageDescriptor);
 
             it = TexCache.erase(it);
         }
     }
-    else if (RenderFrameIdentical)
+    if (textureLayerRecycled)
+    {
+        // A recycled array layer may still be sampled by commands submitted
+        // for the previous frame.  Wait before UploadAndCopyTexture reuses
+        // that layer; otherwise the old and new sprite data can be observed
+        // in different tiles of the same draw.
+        DekoLog("GBAStationNDSStub: texture cache recycled layers, waiting for GPU");
+        Gfx::EmuQueue.waitIdle();
+    }
+    if (RenderFrameIdentical && !textureChanged && !texPalChanged)
     {
         return;
     }
@@ -1088,6 +1224,16 @@ void DekoRenderer::RenderFrame()
     int foundviatexcache = 0, foundviaprev = 0, numslow = 0;
 
     bool enableTextureMaps = RenderDispCnt & (1<<0);
+    if (DebugDisable3DTextures)
+    {
+        enableTextureMaps = false;
+        static bool logged = false;
+        if (!logged)
+        {
+            DekoLog("GBAStationNDSStub: GPU3D_Deko debug disable 3D textures=1");
+            logged = true;
+        }
+    }
 
     for (int i = 0; i < RenderNumPolygons; i++)
     {
@@ -1096,11 +1242,18 @@ void DekoRenderer::RenderFrame()
         u32 nverts = polygon->NumVertices;
         u32 vtop = polygon->VTop, vbot = polygon->VBottom;
         s32 scaledPositions[10][2];
+        // Keep the 1x geometry setup identical to the pre-scale renderer.
+        // In particular, do not substitute cached Polygon::YTop/YBottom:
+        // clipping and degenerate edges can make them differ from the vertex
+        // extrema, shifting the generated span table.  BetterPolygons also
+        // remains on its original path at 1x; the extra CPU work is
+        // intentional while isolating the tile-order problem.
+        const bool useHiresPositions = BetterPolygons && ScaleFactor > 1;
         s32 ytop = ScreenHeight;
         s32 ybot = 0;
         for (u32 j = 0; j < nverts; j++)
         {
-            if (BetterPolygons)
+            if (useHiresPositions)
             {
                 scaledPositions[j][0] = (polygon->Vertices[j]->HiresPosition[0] * ScaleFactor) >> 4;
                 scaledPositions[j][1] = (polygon->Vertices[j]->HiresPosition[1] * ScaleFactor) >> 4;
@@ -1131,7 +1284,14 @@ void DekoRenderer::RenderFrame()
                 && (prevPolygon->Attr & 0x30) == (polygon->Attr & 0x30)
                 && prevPolygon->IsShadowMask == polygon->IsShadowMask;
             if (foundVariant)
+            {
+                // Keep the layer state tied to the current polygon even when
+                // its variant is reused from the preceding polygon.
+                if (enableTextureMaps && ((polygon->TexParam >> 26) & 0x7))
+                    prevTexLayer = GetTexture(polygon->TexParam,
+                        polygon->TexPalette).Texture.LayerIdx;
                 foundviaprev++;
+            }
         }
 
         if (!foundVariant)
@@ -1186,6 +1346,16 @@ void DekoRenderer::RenderFrame()
         }
         RenderPolygons[i].Variant = prevVariant;
         RenderPolygons[i].TextureLayer = (float)prevTexLayer;
+
+        static u32 polygonMapLogCount = 0;
+        if (polygonMapLogCount < 48 && enableTextureMaps
+            && (((polygon->TexParam >> 26) & 0x7) != 0))
+        {
+            DekoLog("GBAStationNDSStub: poly-map i=%d tex=%08x pal=%u var=%u layer=%u y=%d..%d firstSpan=%u",
+                    i, polygon->TexParam, polygon->TexPalette, prevVariant,
+                    prevTexLayer, ytop, ybot, RenderPolygons[i].FirstXSpan);
+            polygonMapLogCount++;
+        }
 
         if (polygon->FacingView)
         {
@@ -1391,18 +1561,22 @@ void DekoRenderer::RenderFrame()
     // bind everything
     EmuCmdBuf.bindImageDescriptorSet(Gfx::DataHeap->GpuAddr(ImageDescriptors), descriptorOffset_Count);
     EmuCmdBuf.bindSamplerDescriptorSet(Gfx::DataHeap->GpuAddr(SamplerDescriptors), 9);
+    const u32 tilePlaneSize = TileMemory.Size / 6;
+    // Keep the original six-buffer tile layout for every normal shader,
+    // including x1.  The monolithic layout is reserved for the optional
+    // Legacy diagnostic shader and is not used by the runtime path.
     EmuCmdBuf.bindStorageBuffers(DkStage_Compute, 0,
     {
         {Gfx::DataHeap->GpuAddr(YSpanSetupMemory[curSlice]), YSpanSetupMemory[curSlice].Size},
         {Gfx::DataHeap->GpuAddr(XSpanSetupMemory), XSpanSetupMemory.Size},
         {Gfx::DataHeap->GpuAddr(RenderPolygonMemory[curSlice]), RenderPolygonMemory[curSlice].Size},
         {gpuAddrBinResult, BinResultMemory.Size},
-        {Gfx::DataHeap->GpuAddr(TileMemory), TileMemory.Size/6},
-        {Gfx::DataHeap->GpuAddr(TileMemory) + TileMemory.Size/6, TileMemory.Size/6},
-        {Gfx::DataHeap->GpuAddr(TileMemory) + TileMemory.Size/6*2, TileMemory.Size/6},
-        {Gfx::DataHeap->GpuAddr(TileMemory) + TileMemory.Size/6*3, TileMemory.Size/6},
-        {Gfx::DataHeap->GpuAddr(TileMemory) + TileMemory.Size/6*4, TileMemory.Size/6},
-        {Gfx::DataHeap->GpuAddr(TileMemory) + TileMemory.Size/6*5, TileMemory.Size/6},
+        {Gfx::DataHeap->GpuAddr(TileMemory), tilePlaneSize},
+        {Gfx::DataHeap->GpuAddr(TileMemory) + tilePlaneSize, tilePlaneSize},
+        {Gfx::DataHeap->GpuAddr(TileMemory) + tilePlaneSize * 2, tilePlaneSize},
+        {Gfx::DataHeap->GpuAddr(TileMemory) + tilePlaneSize * 3, tilePlaneSize},
+        {Gfx::DataHeap->GpuAddr(TileMemory) + tilePlaneSize * 4, tilePlaneSize},
+        {Gfx::DataHeap->GpuAddr(TileMemory) + tilePlaneSize * 5, tilePlaneSize},
         {Gfx::DataHeap->GpuAddr(FinalTileMemory), FinalTileMemory.Size}
     });
 

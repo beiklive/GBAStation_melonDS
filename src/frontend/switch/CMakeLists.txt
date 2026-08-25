@@ -159,6 +159,19 @@ set(GPU3D_SHADER_INSTANCES
     "CalculateWorkOffsets|CalculateWorkOffsets"
     "SortWork|SortWork"
 )
+# Keep a separate native 1x shader set for regression isolation.  These files
+# intentionally use the original unsuffixed names; the renderer selects them
+# only at ScaleFactor == 1.  Scaled paths continue to use the _x2.._x4 sets.
+set(NDS_3D_SCALE 1)
+foreach(instance IN LISTS GPU3D_SHADER_INSTANCES)
+    string(REPLACE "|" ";" parts "${instance}")
+    list(GET parts 0 output_name)
+    list(REMOVE_AT parts 0)
+    string(REPLACE "," ";" defines "${parts}")
+    list(APPEND defines Legacy)
+    compile_shader_instance(comp ../../shaders/GPU3D_Comp ${output_name} "${defines}")
+endforeach()
+
 foreach(scale RANGE 1 4)
     foreach(instance IN LISTS GPU3D_SHADER_INSTANCES)
         string(REPLACE "|" ";" parts "${instance}")

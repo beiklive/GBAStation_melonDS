@@ -235,8 +235,8 @@ private:
 
     TexCacheEntry& GetTexture(u32 textureParam, u32 paletteParam);
 
-    void LoadShaders(int scale);
-    void AllocateScaleResources(int scale);
+    bool LoadShaders(int scale);
+    bool AllocateScaleResources(int scale);
     void FreeScaleResources();
     std::size_t BinResultSize() const;
     std::size_t TilesSize() const;

@@ -44,6 +44,24 @@ int CurrentUiScreen = uiScreen_Start;
 
 PadState Pad;
 
+namespace
+{
+
+FILE* StartupLogFile = nullptr;
+
+void StartupLog(const char* message)
+{
+    if (!StartupLogFile)
+        StartupLogFile = fopen("sdmc:/switch/melonds/startup.log", "w");
+    if (StartupLogFile)
+    {
+        fprintf(StartupLogFile, "%s\n", message);
+        fflush(StartupLogFile);
+    }
+}
+
+}
+
 namespace Profiler
 {
 
@@ -254,10 +272,14 @@ void AudioOutput(void *args)
 
 void Init()
 {
+    StartupLog("startup: Emulation frontend Init begin");
     NDS::Init();
+    StartupLog("startup: NDS::Init complete");
     GPU::InitRenderer(0);
+    StartupLog("startup: GPU::InitRenderer complete");
     GPU::RenderSettings settings{true, 1, false};
     GPU::SetRenderSettings(0, settings);
+    StartupLog("startup: GPU::SetRenderSettings complete");
 
     for (int j = 0; j < 2; j++)
     {
@@ -979,21 +1001,26 @@ void OnAppletHook(AppletHookType hook, void *param)
 
 int main(int argc, const char* argv[])
 {
+    StartupLog("startup: enter main");
     appletLockExit();
 
     socketInitializeDefault();
     nxlinkStdio();
+    StartupLog("startup: services initialized");
 
     romfsInit();
     setInitialize();
+    StartupLog("startup: romfs/settings initialized");
 
     padConfigureInput(1, HidNpadStyleSet_NpadFullCtrl);
     padInitializeDefault(&Pad);
 
     hidInitializeTouchScreen();
     InputConfig::setupInputActions();
+    StartupLog("startup: input initialized");
 
     Gfx::Init();
+    StartupLog("startup: Gfx::Init complete");
 
     Overclocking::Init();
 
@@ -1001,6 +1028,7 @@ int main(int argc, const char* argv[])
     appletHook(&aptCookie, OnAppletHook, NULL);
 
     Config::Load();
+    StartupLog("startup: Config::Load complete");
     
     strcpy(Config::FirmwarePath, "firmware.bin");
     strcpy(Config::BIOS9Path, "bios9.bin");
@@ -1023,6 +1051,7 @@ int main(int argc, const char* argv[])
 
     Frontend::Init_ROM();
     Emulation::Init();
+    StartupLog("startup: Emulation::Init complete");
 
     bool argvLoaded = false;
     static bool pad_initialized = false;
@@ -1038,9 +1067,18 @@ int main(int argc, const char* argv[])
     if (Config::RetroAchievementsUsername[0] != '\0')
         InitRetroAchievements(Config::RetroAchievementsUsername, Config::RetroAchievementsToken, true);
     
+    unsigned startupFrame = 0;
     while (appletMainLoop() && !Done)
     {
+        if (startupFrame < 3)
+        {
+            char line[96];
+            snprintf(line, sizeof(line), "startup: frame %u begin", startupFrame);
+            StartupLog(line);
+        }
         Gfx::StartFrame();
+        if (startupFrame < 3)
+            StartupLog("startup: Gfx::StartFrame complete");
 
         int rotation = Config::GlobalRotation;
         int screenWidth = 1280, screenHeight = 720;
@@ -1059,7 +1097,11 @@ int main(int argc, const char* argv[])
 
         if (Emulation::State != Emulation::emuState_Nothing)
         {
+            if (startupFrame < 3)
+                StartupLog("startup: UpdateAndDraw begin");
             Emulation::UpdateAndDraw(logicalKeysDown, logicalKeysUp);
+            if (startupFrame < 3)
+                StartupLog("startup: UpdateAndDraw complete");
         }
 
         switch (CurrentUiScreen)
@@ -1103,6 +1145,9 @@ int main(int argc, const char* argv[])
 
         Gfx::EndFrame(Emulation::State == Emulation::emuState_Running
             ? Gfx::Color() : WallpaperColor, rotation);
+        if (startupFrame < 3)
+            StartupLog("startup: Gfx::EndFrame complete");
+        startupFrame++;
     }
 
     Emulation::DeInit();

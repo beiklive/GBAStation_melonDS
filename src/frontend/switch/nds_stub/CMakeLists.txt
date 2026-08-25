@@ -108,6 +108,23 @@ function(nds_stub_compile_3d_shader_instance stage source_no_ext output_name def
     set(NDS_STUB_DEKO_SHADERS ${NDS_STUB_DEKO_SHADERS} PARENT_SCOPE)
 endfunction()
 
+function(nds_stub_compile_legacy_3d_shader_instance stage source_no_ext output_name defines)
+    foreach(var IN LISTS defines)
+        set(${var} 1)
+    endforeach()
+    set(Legacy 1)
+    set(NDS_3D_SCALE 1)
+    set(generated_file ${NDS_STUB_GENERATED_SHADER_DIR}/${output_name}.glsl)
+    configure_file(${source_no_ext}.glsl ${generated_file})
+    set(out_file ${NDS_STUB_SHADER_DIR}/${output_name}.dksh)
+    add_custom_command(OUTPUT ${out_file}
+        COMMAND ${NDS_STUB_UAM_EXE} -s ${stage} -o ${out_file} ${generated_file}
+        DEPENDS ${generated_file}
+    )
+    list(APPEND NDS_STUB_DEKO_SHADERS ${out_file})
+    set(NDS_STUB_DEKO_SHADERS ${NDS_STUB_DEKO_SHADERS} PARENT_SCOPE)
+endfunction()
+
 nds_stub_compile_shader(vert ${ARCDELTA_SWITCH_SHADER_DIR}/Default_vsh Default_vsh)
 nds_stub_compile_shader(frag ${ARCDELTA_SWITCH_SHADER_DIR}/Default_fsh Default_fsh)
 nds_stub_compile_shader(frag ${NDS_STUB_SHADER_SOURCE_DIR}/NdsDot_fsh NdsDot_fsh)
@@ -173,6 +190,15 @@ set(NDS_STUB_GPU3D_SHADER_INSTANCES
     "CalculateWorkOffsets|CalculateWorkOffsets"
     "SortWork|SortWork"
 )
+foreach(instance IN LISTS NDS_STUB_GPU3D_SHADER_INSTANCES)
+    string(REPLACE "|" ";" instance_parts "${instance}")
+    list(GET instance_parts 0 output_name)
+    list(REMOVE_AT instance_parts 0)
+    string(REPLACE "," ";" instance_defines "${instance_parts}")
+    list(APPEND instance_defines Legacy)
+    nds_stub_compile_legacy_3d_shader_instance(comp ${ARCDELTA_CORE_SHADER_DIR}/GPU3D_Comp ${output_name} "${instance_defines}")
+endforeach()
+
 foreach(scale RANGE 1 4)
     foreach(instance IN LISTS NDS_STUB_GPU3D_SHADER_INSTANCES)
         string(REPLACE "|" ";" instance_parts "${instance}")

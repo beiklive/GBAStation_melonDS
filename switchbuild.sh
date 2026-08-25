@@ -25,7 +25,7 @@ usage() {
     cat <<EOF
 Usage: $0 [-j JOBS] [--build-dir DIR] [--clean]
 
-Build melonDS.nro using the Switch toolchain from an MSYS2 shell.
+Build GBAStationNDSStub.nro using the Switch toolchain from an MSYS2 shell.
 
   -j, --jobs N       Number of parallel compile jobs (default: nproc, or 4).
       --build-dir D  CMake build directory (default: build_switch).
@@ -128,7 +128,7 @@ else
 fi
 
 echo "Configuring Switch build ..."
-BUILD_TARGET="melonDS.nro"
+BUILD_TARGET="GBAStationNDSStub.nro"
 OPENGL_ARGS=(-DBUILD_SWITCH_GL=OFF -DBUILD_SWITCH=ON -DENABLE_OGLRENDERER=OFF -DENABLE_DEKOGPU=ON)
 cmake -S "${ROOT_DIR}" -B "${BUILD_DIR}" \
     -DCMAKE_TOOLCHAIN_FILE="${TOOLCHAIN_FILE}" \
