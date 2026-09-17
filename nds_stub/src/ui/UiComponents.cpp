@@ -1249,6 +1249,7 @@ void drawDisplayPage(bool linearFiltering,
                      int layout,
                      int orientation,
                      int screenGap,
+                     bool noSync,
                      int focusedRow,
                      bool contentFocused,
                      float offsetX,
@@ -1291,9 +1292,16 @@ void drawDisplayPage(bool linearFiltering,
     drawSubPageRow(rowPos(y), NDS_L("遮罩选择"), contentFocused && focusedRow == 8, true, opacity); y += kSettingStepY;
     drawSubPageRow(rowPos(y), NDS_L("滤镜选择"), contentFocused && focusedRow == 9, true, opacity); y += 65.0f;
     drawSectionLabel(rowPos(y + 2.0f), NDS_L("同步设置"), opacity); y += 36.0f;
-    drawButtonRow(rowPos(y), NDS_L("同步画面设置"), contentFocused && focusedRow == 10, opacity); y += kSettingStepY;
-    drawButtonRow(rowPos(y), NDS_L("同步遮罩设置"), contentFocused && focusedRow == 11, opacity); y += kSettingStepY;
-    drawButtonRow(rowPos(y), NDS_L("同步滤镜设置"), contentFocused && focusedRow == 12, opacity);
+    drawSwitchRow(rowPos(y), NDS_L("锁定本游戏配置"), noSync, contentFocused && focusedRow == 10, opacity);
+    Gfx::DrawText(Gfx::SystemFontChinese,
+                  rowPos(y) + Vector2f{0.0f, 56.0f},
+                  15.0f,
+                  {0.72f, 0.82f, 0.92f, 0.95f * opacity},
+                  NDS_L("  开启后同平台同步操作将跳过本游戏"));
+    y += kSettingStepY + 34.0f;
+    drawButtonRow(rowPos(y), NDS_L("同步画面设置"), contentFocused && focusedRow == 11, opacity); y += kSettingStepY;
+    drawButtonRow(rowPos(y), NDS_L("同步遮罩设置"), contentFocused && focusedRow == 12, opacity); y += kSettingStepY;
+    drawButtonRow(rowPos(y), NDS_L("同步滤镜设置"), contentFocused && focusedRow == 13, opacity);
 
     if (opacity > 0.5f && scrollY > 1.0f)
         drawRect({kContentX + kContentW - 4.0f, kContentY + kContentBodyTop + offsetY},
@@ -1430,7 +1438,7 @@ void drawSyncConfirmDialog(NdsMenuAction action, float opacity)
                             : (overlay
                                 ? NDS_L("将当前游戏的遮罩数据同步到其他NDS游戏。")
                                 : NDS_L("将当前游戏的滤镜开关和滤镜名称同步到其他NDS游戏。")),
-                        NDS_L("确认后会立即开始同步。"),
+                        NDS_L("确认后立即同步；已锁定的游戏会被跳过。"),
                         NDS_L("确定"),
                         true,
                         opacity);
@@ -1972,6 +1980,7 @@ void drawTabFrame(NdsMenuLayer::Item item,
                             display.layout,
                             display.orientation,
                             display.screenGap,
+                            display.noSync,
                             contentFocus,
                             contentFocused,
                             offsetX,

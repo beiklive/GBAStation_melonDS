@@ -23,6 +23,7 @@ enum class NdsMenuAction {
     ShaderSettingsChanged,
     ShaderSettingsCommitted,
     CheatSettingsChanged,
+    NoSyncChanged,
     SyncDisplaySettings,
     SyncOverlaySettings,
     SyncShaderSettings,
@@ -66,6 +67,8 @@ struct NdsDisplaySettings {
     int layout = 0;
     int orientation = 0;
     int screenGap = 0;
+    // 1 = locked: GameDB batch sync actions skip this game.
+    bool noSync = false;
     bool overlayEnabled = false;
     std::string overlayPath;
     bool shaderEnabled = false;

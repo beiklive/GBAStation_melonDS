@@ -184,6 +184,18 @@ std::string jsonString(const nlohmann::json& item, const char* key)
     return item.at(key).get<std::string>();
 }
 
+bool jsonNoSync(const nlohmann::json& item)
+{
+    if (!item.contains("noSync"))
+        return false;
+    const auto& value = item.at("noSync");
+    if (value.is_boolean())
+        return value.get<bool>();
+    if (value.is_number())
+        return value.get<int>() != 0;
+    return false;
+}
+
 std::vector<beiklive::nds_stub::NdsShaderParam> defaultNdsShaderParams(const std::string& type)
 {
     using beiklive::nds_stub::NdsShaderParam;
@@ -448,6 +460,46 @@ NdsPlayStats loadAndIncrementNdsPlayCount(const std::string& romPath)
     return stats;
 }
 
+bool loadNdsNoSyncFromGameDb(const std::string& romPath)
+{
+    const std::string normalizedRom = normalizePathForCompare(romPath);
+    constexpr const char* paths[] = {
+        "sdmc:/GBAStation/data/GameData_NDS.json",
+        "/GBAStation/data/GameData_NDS.json",
+    };
+
+    for (const char* dbPath : paths)
+    {
+        std::ifstream in(dbPath);
+        if (!in)
+            continue;
+
+        try
+        {
+            nlohmann::json data;
+            in >> data;
+            in.close();
+            if (!data.is_array())
+                continue;
+
+            for (const auto& item : data)
+            {
+                const std::string itemPath = normalizePathForCompare(jsonString(item, "path"));
+                if (itemPath != normalizedRom)
+                    continue;
+                return jsonNoSync(item);
+            }
+        }
+        catch (const std::exception& e)
+        {
+            beiklive::nds_stub::appendStubLog("GBAStationNDSStub: noSync load exception path=%s error=%s",
+                                              dbPath,
+                                              e.what());
+        }
+    }
+    return false;
+}
+
 bool saveNdsPlayStatsToGameDb(const std::string& romPath,
                               int playCount,
                               int playTime,
@@ -610,6 +662,67 @@ bool saveNdsSettingsToGameDb(const std::string& romPath,
     return false;
 }
 
+bool saveNdsNoSyncToGameDb(const std::string& romPath, bool noSync)
+{
+    const std::string normalizedRom = normalizePathForCompare(romPath);
+    constexpr const char* paths[] = {
+        "sdmc:/GBAStation/data/GameData_NDS.json",
+        "/GBAStation/data/GameData_NDS.json",
+    };
+
+    for (const char* dbPath : paths)
+    {
+        std::ifstream in(dbPath);
+        if (!in)
+            continue;
+
+        try
+        {
+            nlohmann::json data;
+            in >> data;
+            in.close();
+            if (!data.is_array())
+                continue;
+
+            bool updated = false;
+            for (auto& item : data)
+            {
+                const std::string itemPath = normalizePathForCompare(jsonString(item, "path"));
+                if (itemPath != normalizedRom)
+                    continue;
+                /* The launcher deserializes noSync as an integer. */
+                item["noSync"] = noSync ? 1 : 0;
+                updated = true;
+                break;
+            }
+
+            if (!updated)
+                continue;
+
+            std::ofstream out(dbPath, std::ios::trunc);
+            if (!out)
+                return false;
+            out << data.dump(4) << '\n';
+            const bool ok = out.good();
+            beiklive::nds_stub::appendStubLog("GBAStationNDSStub: noSync GameDB save %s path=%s value=%d",
+                                              ok ? "ok" : "failed",
+                                              dbPath,
+                                              noSync ? 1 : 0);
+            return ok;
+        }
+        catch (const std::exception& e)
+        {
+            beiklive::nds_stub::appendStubLog("GBAStationNDSStub: noSync GameDB save exception path=%s error=%s",
+                                              dbPath,
+                                              e.what());
+        }
+    }
+
+    beiklive::nds_stub::appendStubLog("GBAStationNDSStub: noSync GameDB save skipped no match rom=%s",
+                                      romPath.c_str());
+    return false;
+}
+
 int syncNdsDisplaySettingsToGameDb(const std::string& romPath,
                                    const beiklive::nds_stub::NdsDisplaySettings& settings)
 {
@@ -638,6 +751,9 @@ int syncNdsDisplaySettingsToGameDb(const std::string& romPath,
             {
                 const std::string itemPath = normalizePathForCompare(jsonString(item, "path"));
                 if (itemPath.empty() || itemPath == normalizedRom)
+                    continue;
+                /* Locked games keep their own display configuration. */
+                if (jsonNoSync(item))
                     continue;
 
                 item["ndsScreenLayout"] = layoutIdFromIndex(settings.layout);
@@ -711,6 +827,9 @@ int syncNdsOverlaySettingsToGameDb(const std::string& romPath,
                 const std::string itemPath = normalizePathForCompare(jsonString(item, "path"));
                 if (itemPath.empty() || itemPath == normalizedRom)
                     continue;
+                /* Locked games keep their own display configuration. */
+                if (jsonNoSync(item))
+                    continue;
 
                 item["overlayEnabled"] = settings.overlayEnabled;
                 item["overlayPath"] = settings.overlayPath;
@@ -773,6 +892,9 @@ int syncNdsShaderSettingsToGameDb(const std::string& romPath,
             {
                 const std::string itemPath = normalizePathForCompare(jsonString(item, "path"));
                 if (itemPath.empty() || itemPath == normalizedRom)
+                    continue;
+                /* Locked games keep their own display configuration. */
+                if (jsonNoSync(item))
                     continue;
 
                 item["shaderEnabled"] = settings.shaderEnabled;
@@ -2525,6 +2647,7 @@ int RunDekoRuntime(const DekoRunOptions& options)
     initialDisplay.layout = layoutIndexFromId(options.screenLayout.empty() ? "priority_top" : options.screenLayout);
     initialDisplay.orientation = orientationIndexFromId(options.screenOrientation.empty() ? "0" : options.screenOrientation);
     initialDisplay.screenGap = std::clamp(options.screenGap, -256, 256);
+    initialDisplay.noSync = loadNdsNoSyncFromGameDb(options.romPath);
     initialDisplay.overlayEnabled = options.overlayEnabled;
     initialDisplay.overlayPath = options.overlayPath;
     initialDisplay.shaderEnabled = options.shaderEnabled;
@@ -2969,6 +3092,12 @@ int RunDekoRuntime(const DekoRunOptions& options)
         {
             cheatApplyPending = true;
             appendStubLog("GBAStationNDSStub: cheats changed pending apply");
+        }
+        else if (menuAction == NdsMenuAction::NoSyncChanged)
+        {
+            const bool noSync = menuLayer.displaySettings().noSync;
+            saveNdsNoSyncToGameDb(options.romPath, noSync);
+            appendStubLog("GBAStationNDSStub: noSync changed value=%d", noSync ? 1 : 0);
         }
         else if (menuAction == NdsMenuAction::OverlaySettingsChanged)
         {
