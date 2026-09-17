@@ -341,9 +341,13 @@ std::vector<NdsGameLayer::ScreenDrawRect> NdsGameLayer::computeScreenRects() con
     auto source = [&](bool layoutTop) {
         return m_screensSwapped ? !layoutTop : layoutTop;
     };
-    auto add = [&](bool layoutTop, const RectF& rect) {
+    // allowSwap == false pins the slot to its own screen: the hybrid layout uses
+    // it for the small pair, which must ignore the swap-screens toggle.
+    auto add = [&](bool layoutTop, const RectF& rect, bool allowSwap = true) {
         if (validRect(rect))
-            rects.push_back({source(layoutTop), rotateScreenRect(rect, bounds), rect});
+            rects.push_back({allowSwap ? source(layoutTop) : layoutTop,
+                             rotateScreenRect(rect, bounds),
+                             rect});
     };
 
     switch (m_layout)
@@ -401,9 +405,11 @@ std::vector<NdsGameLayer::ScreenDrawRect> NdsGameLayer::computeScreenRects() con
         const RectF rightTop{right.x, right.y, right.w, rightScreenH};
         const RectF rightBottom{right.x, right.y + rightScreenH + verticalGap, right.w, rightScreenH};
 
+        // Only the enlarged left panel follows the swap-screens toggle; the small
+        // pair on the right stays top-over-bottom so it keeps showing both screens.
         add(true, m_integerScale ? fitIntegerAligned(left, 2.0f, 1.0f, 0.5f) : fitAspectAligned(left, 1.0f, 0.5f));
-        add(true, m_integerScale ? fitIntegerAligned(rightTop, 1.0f, 0.0f, 1.0f) : fitAspectAligned(rightTop, 0.0f, 1.0f));
-        add(false, m_integerScale ? fitIntegerAligned(rightBottom, 1.0f, 0.0f, 0.0f) : fitAspectAligned(rightBottom, 0.0f, 0.0f));
+        add(true, m_integerScale ? fitIntegerAligned(rightTop, 1.0f, 0.0f, 1.0f) : fitAspectAligned(rightTop, 0.0f, 1.0f), false);
+        add(false, m_integerScale ? fitIntegerAligned(rightBottom, 1.0f, 0.0f, 0.0f) : fitAspectAligned(rightBottom, 0.0f, 0.0f), false);
         break;
     }
     case ScreenLayout::SingleTop:
@@ -662,8 +668,11 @@ bool NdsGameLayer::refreshCaptureCache() const
         !m_renderer->ReadFramebufferRGBA(top, bottom))
         return false;
 
-    const std::vector<std::uint8_t>& upper = m_screensSwapped ? bottom : top;
-    const std::vector<std::uint8_t>& lower = m_screensSwapped ? top : bottom;
+    // The stacked capture is always [top screen, bottom screen]. Slots pick their
+    // half from the screen they draw, so reordering here would desync the menu
+    // freeze background and screenshots from the live layout.
+    const std::vector<std::uint8_t>& upper = top;
+    const std::vector<std::uint8_t>& lower = bottom;
     const int srcW = m_renderer->GetFramebufferWidth();
     const int srcH = m_renderer->GetFramebufferHeight();
     const std::size_t expectedBytes = static_cast<std::size_t>(srcW) * srcH * 4;

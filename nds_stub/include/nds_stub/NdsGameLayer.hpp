@@ -55,6 +55,9 @@ public:
     void setWaitForFramebufferReady(bool enabled) { m_waitForFramebufferReady = enabled; }
     void setLinearFiltering(bool enabled) { m_linearFiltering = enabled; }
     bool linearFiltering() const { return m_linearFiltering; }
+    // Swaps which DS screen each layout slot draws.
+    // Hybrid layout: only the enlarged panel follows this, the small pair on the
+    // right always keeps top over bottom.
     void setScreensSwapped(bool enabled) { m_screensSwapped = enabled; }
     bool screensSwapped() const { return m_screensSwapped; }
     void setScreenLayout(int layout);
