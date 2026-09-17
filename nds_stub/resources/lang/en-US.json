@@ -50,6 +50,7 @@
     "默认 %d / 步长 %d": "Default %d / Step %d",
     "默认 / 步长 %d": "Default / Step %d",
     "屏幕间距": "Screen Gap",
+    "模拟合盖": "Simulate Lid Close",
     "取消": "Cancel",
     "确定": "OK",
     "确认后会立即开始同步。": "Syncing starts immediately after confirmation.",

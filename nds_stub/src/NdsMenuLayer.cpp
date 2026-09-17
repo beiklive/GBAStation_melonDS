@@ -70,10 +70,11 @@ constexpr const char* kOverlayRoot = "sdmc:/GBAStation/overlays";
 constexpr int kDisplayRowCustomLayout = 5;
 constexpr int kDisplayRowOverlay = 8;
 constexpr int kDisplayRowShader = 9;
-constexpr int kDisplayRowNoSync = 10;
-constexpr int kDisplayRowSyncDisplay = 11;
-constexpr int kDisplayRowSyncOverlay = 12;
-constexpr int kDisplayRowSyncShader = 13;
+constexpr int kDisplayRowLid = 10;
+constexpr int kDisplayRowNoSync = 11;
+constexpr int kDisplayRowSyncDisplay = 12;
+constexpr int kDisplayRowSyncOverlay = 13;
+constexpr int kDisplayRowSyncShader = 14;
 
 bool isDirectionUp(std::uint64_t buttons)
 {
@@ -398,10 +399,11 @@ float displayRowY(int row)
     case 7: return kSettingStepY * 7.0f + kRenderScaleWarningH + 43.0f;
     case 8: return kSettingStepY * 8.0f + kRenderScaleWarningH + 43.0f;
     case 9: return kSettingStepY * 9.0f + kRenderScaleWarningH + 43.0f;
-    case 10: return kSettingStepY * 10.0f + kRenderScaleWarningH + 86.0f;
-    case 11: return kSettingStepY * 11.0f + kRenderScaleWarningH + 120.0f;
+    case 10: return kSettingStepY * 10.0f + kRenderScaleWarningH + 43.0f;
+    case 11: return kSettingStepY * 11.0f + kRenderScaleWarningH + 86.0f;
     case 12: return kSettingStepY * 12.0f + kRenderScaleWarningH + 120.0f;
     case 13: return kSettingStepY * 13.0f + kRenderScaleWarningH + 120.0f;
+    case 14: return kSettingStepY * 14.0f + kRenderScaleWarningH + 120.0f;
     default: return 0.0f;
     }
 }
@@ -854,7 +856,7 @@ float NdsMenuLayer::targetContentScrollY() const
     case Item::Display:
     {
         const int row = std::clamp(m_contentFocus, 0, contentControlCount(Item::Display) - 1);
-        const float contentH = displayRowY(13) + kSettingRowH;
+        const float contentH = displayRowY(14) + kSettingRowH;
         return focusedScroll(displayRowY(row), kSettingRowH, contentH);
     }
     case Item::Cheats:
@@ -1076,7 +1078,7 @@ int NdsMenuLayer::contentControlCount(Item item) const
     case Item::LoadState:
         return 10;
     case Item::Display:
-        return 14;
+        return 15;
     case Item::Cheats:
         return static_cast<int>(visibleCheatIndices().size());
     default:
@@ -2166,6 +2168,12 @@ NdsMenuResult NdsMenuLayer::update(std::uint64_t buttonsDown, std::uint64_t butt
 
             if (buttonsDown & HidNpadButton_A)
             {
+                if (m_contentFocus == kDisplayRowLid)
+                {
+                    queueSound(NdsMenuSound::Click);
+                    m_lidClosed = !m_lidClosed;
+                    return {NdsMenuAction::LidChanged, -1};
+                }
                 if (m_contentFocus == kDisplayRowNoSync)
                 {
                     queueSound(NdsMenuSound::Click);
@@ -2460,6 +2468,7 @@ void NdsMenuLayer::draw() const
                  static_cast<Item>(m_previousSelected),
                  pageProgress,
                  m_display,
+                 m_lidClosed,
                  m_slots,
                  m_cheats,
                  visibleCheatIndices(),

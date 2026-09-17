@@ -3099,6 +3099,13 @@ int RunDekoRuntime(const DekoRunOptions& options)
             saveNdsNoSyncToGameDb(options.romPath, noSync);
             appendStubLog("GBAStationNDSStub: noSync changed value=%d", noSync ? 1 : 0);
         }
+        else if (menuAction == NdsMenuAction::LidChanged)
+        {
+            /* Runtime-only simulated lid state: never persisted, cleared on relaunch. */
+            const bool lidClosed = menuLayer.lidClosed();
+            NDS::SetLidClosed(lidClosed);
+            appendStubLog("GBAStationNDSStub: lid changed closed=%d", lidClosed ? 1 : 0);
+        }
         else if (menuAction == NdsMenuAction::OverlaySettingsChanged)
         {
             if (reloadOverlayTexture(menuLayer.displaySettings()))

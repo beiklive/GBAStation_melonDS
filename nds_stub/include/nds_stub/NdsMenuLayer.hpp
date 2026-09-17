@@ -24,6 +24,7 @@ enum class NdsMenuAction {
     ShaderSettingsCommitted,
     CheatSettingsChanged,
     NoSyncChanged,
+    LidChanged,
     SyncDisplaySettings,
     SyncOverlaySettings,
     SyncShaderSettings,
@@ -129,6 +130,9 @@ public:
     bool integerScale() const { return m_display.integerScale; }
     int screenLayout() const { return m_display.layout; }
     float fastForwardMultiplier() const { return m_display.fastForwardMultiplier; }
+    // Simulated lid state for the emulated DS. Deliberately runtime-only: it is
+    // neither saved to the config file nor to the GameDB.
+    bool lidClosed() const { return m_lidClosed; }
     void setFastForwardMultiplier(float multiplier);
     void setDisplaySettings(const NdsDisplaySettings& settings);
     const NdsDisplaySettings& displaySettings() const { return m_display; }
@@ -205,6 +209,7 @@ private:
     FocusScope m_focusScope = FocusScope::Tabs;
     int m_contentFocus = 0;
     NdsDisplaySettings m_display {};
+    bool m_lidClosed = false;
     std::array<NdsStateSlotInfo, 10> m_slots {};
     std::vector<NdsCheatItem> m_cheats {};
     mutable std::vector<int> m_visibleCheatCache {};
