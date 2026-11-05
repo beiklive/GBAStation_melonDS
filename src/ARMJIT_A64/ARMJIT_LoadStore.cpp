@@ -64,12 +64,9 @@ bool Compiler::Comp_MemLoadLiteral(int size, bool signExtend, int rd, u32 addr)
 {
     u32 localAddr = LocaliseCodeAddress(Num, addr);
 
-    int invalidLiteralIdx = InvalidLiterals.Find(localAddr);
-    if (invalidLiteralIdx != -1)
-    {
-        InvalidLiterals.Remove(invalidLiteralIdx);
+    // A rewritten literal must be read at run time until the block cache is reset.
+    if (!localAddr || InvalidLiterals.Find(localAddr) != -1)
         return false;
-    }
 
     Comp_AddCycles_CDI();
 

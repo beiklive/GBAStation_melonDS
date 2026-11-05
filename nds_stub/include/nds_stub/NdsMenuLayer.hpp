@@ -60,6 +60,14 @@ struct NdsStateSlotInfo {
     bool thumbnailAvailable = false;
 };
 
+// Focus order is shared by input, scrolling and drawing.
+enum NdsDisplayRow {
+    RowFastForward, RowFilter, RowResolution,
+    RowIntegerScale, RowLayout, RowCustomLayout, RowOrientation, RowScreenGap,
+    RowOverlay, RowShader, RowLid, RowNoSync, RowSyncDisplay, RowSyncOverlay, RowSyncShader,
+    DisplayRowCount
+};
+
 struct NdsDisplaySettings {
     float fastForwardMultiplier = 1.0f;
     bool linearFiltering = false;

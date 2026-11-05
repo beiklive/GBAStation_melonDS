@@ -308,6 +308,9 @@ void Stop()
 void DoSavestate(Savestate* file)
 {
     file->Section("GPUG");
+#ifdef DEKOGPU_ENABLED
+    if (!file->Saving) static_cast<GPU2D::DekoRenderer*>(GPU2D_Renderer.get())->PresentEnhanced = false;
+#endif
 
     file->Var16(&VCount);
     file->Var32(&NextVCount);

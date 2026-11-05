@@ -57,6 +57,9 @@ if (ENABLE_DEKOGPU)
 	target_sources(core PRIVATE
 		GPU2D_Deko.cpp
 		GPU3D_Deko.cpp
+        fulldex/Frame.cpp
+        fulldex/Raster.cpp
+        fulldex/Presenter.cpp
 	)
 endif()
 

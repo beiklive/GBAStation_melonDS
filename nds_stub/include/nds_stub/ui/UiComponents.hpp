@@ -121,15 +121,8 @@ void drawInfoPage(const char* title, const char* body, float offsetX, float offs
 // 绘制画面设置页面
 // 显示两行设置项：画面过滤（Linear/Nearest）和快进倍率（x1~x4）
 // 底部提示"A 切换过滤，左右键调整快进倍率"
-void drawDisplayPage(bool linearFiltering,
-                     float fastForwardMultiplier,
-                     int renderScale,
-                     bool integerScale,
-                     int layout,
-                     int orientation,
-                     int screenGap,
+void drawDisplayPage(const NdsDisplaySettings& display,
                      bool lidClosed,
-                     bool noSync,
                      int focusedRow,
                      bool contentFocused,
                      float offsetX,

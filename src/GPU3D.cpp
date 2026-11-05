@@ -180,6 +180,7 @@ u8 RenderFogDensityTable[34];
 u32 RenderClearAttr1, RenderClearAttr2;
 
 bool RenderFrameIdentical;
+u64 GeometrySerial, GeometryEpoch;
 
 u16 RenderXPos;
 
@@ -318,6 +319,7 @@ void ResetRenderingState()
 
 void Reset()
 {
+    ++GeometryEpoch;
     CmdFIFO.Clear();
     CmdPIPE.Clear();
 
@@ -608,6 +610,7 @@ void DoSavestate(Savestate* file)
 
     if (!file->Saving)
     {
+        ++GeometryEpoch;
         ClipMatrixDirty = true;
         UpdateClipMatrix();
 
@@ -2342,6 +2345,7 @@ void VBlank()
                         YSort);
                 }
 
+                ++GeometrySerial;
                 RenderNumPolygons = NumPolygons;
                 RenderFrameIdentical = false;
             }

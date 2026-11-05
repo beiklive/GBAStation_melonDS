@@ -1,5 +1,5 @@
 {
-    "  注意：1-3倍为安全分辨率，4倍可能导致卡顿、内存不足或崩溃，请酌情使用": "  注意：1-3倍为安全分辨率，4倍可能导致卡顿、内存不足或崩溃，请酌情使用",
+    "无法保存画面设置": "Could not save display settings",
     "0度": "0deg",
     "180度": "180deg",
     "270度": "270deg",
@@ -98,5 +98,7 @@
     "重置游戏": "Reset Game",
     "自定义": "Custom",
     "自定义画面布局": "Custom Layout",
-    "纵向对称": "Vertical Symmetric"
+    "纵向对称": "Vertical Symmetric",
+    "倍率越高，GPU 负载越高。10 倍为 2560×1920。": "Higher scales increase GPU load. 10x is 2560×1920.",
+    "显存不足，已保留原倍率": "Insufficient GPU memory; previous resolution retained"
 }

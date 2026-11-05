@@ -1,3 +1,4 @@
+#include "fulldex/Presentation.h"
 #include "nds_stub/NdsMenuLayer.hpp"
 
 #include <algorithm>
@@ -30,7 +31,6 @@ constexpr float kNavInitialDelayMs = 280.0f;
 constexpr float kSaveCardH = 112.0f;
 constexpr float kSaveCardGapY = 16.0f;
 constexpr float kSettingRowH = 50.0f;
-constexpr float kSettingStepY = 58.0f;
 constexpr float kRenderScaleWarningH = 34.0f;
 constexpr float kCheatRowH = 50.0f;
 constexpr float kCheatStepY = 58.0f;
@@ -67,15 +67,6 @@ constexpr float kShaderListFooterH = 54.0f;
 constexpr float kShaderListPadTop = 30.0f;
 constexpr float kShaderListPadBottom = 14.0f;
 constexpr const char* kOverlayRoot = "sdmc:/GBAStation/overlays";
-constexpr int kDisplayRowCustomLayout = 5;
-constexpr int kDisplayRowOverlay = 8;
-constexpr int kDisplayRowShader = 9;
-constexpr int kDisplayRowLid = 10;
-constexpr int kDisplayRowNoSync = 11;
-constexpr int kDisplayRowSyncDisplay = 12;
-constexpr int kDisplayRowSyncOverlay = 13;
-constexpr int kDisplayRowSyncShader = 14;
-
 bool isDirectionUp(std::uint64_t buttons)
 {
     return (buttons & HidNpadButton_AnyUp) != 0;
@@ -387,25 +378,14 @@ bool loadPngTextureFromFile(const std::string& path, std::uint32_t& texture, int
 
 float displayRowY(int row)
 {
-    switch (row)
-    {
-    case 0: return 0.0f;
-    case 1: return kSettingStepY;
-    case 2: return kSettingStepY * 2.0f;
-    case 3: return kSettingStepY * 3.0f + kRenderScaleWarningH;
-    case 4: return kSettingStepY * 4.0f + kRenderScaleWarningH;
-    case 5: return kSettingStepY * 5.0f + kRenderScaleWarningH;
-    case 6: return kSettingStepY * 6.0f + kRenderScaleWarningH;
-    case 7: return kSettingStepY * 7.0f + kRenderScaleWarningH + 43.0f;
-    case 8: return kSettingStepY * 8.0f + kRenderScaleWarningH + 43.0f;
-    case 9: return kSettingStepY * 9.0f + kRenderScaleWarningH + 43.0f;
-    case 10: return kSettingStepY * 10.0f + kRenderScaleWarningH + 43.0f;
-    case 11: return kSettingStepY * 11.0f + kRenderScaleWarningH + 86.0f;
-    case 12: return kSettingStepY * 12.0f + kRenderScaleWarningH + 120.0f;
-    case 13: return kSettingStepY * 13.0f + kRenderScaleWarningH + 120.0f;
-    case 14: return kSettingStepY * 14.0f + kRenderScaleWarningH + 120.0f;
-    default: return 0.0f;
-    }
+    const float step = menuMetrics().settingStepY;
+    float y = row * step;
+    if (row > RowResolution) y += kRenderScaleWarningH;
+    // The overlay and synchronisation sections have headers; the no-sync row has a note.
+    if (row >= RowOverlay) y += 65.0f - step + 36.0f;
+    if (row >= RowNoSync) y += 65.0f - step + 36.0f;
+    if (row > RowNoSync) y += 34.0f;
+    return y;
 }
 
 int clampScreenGap(int value)
@@ -856,7 +836,7 @@ float NdsMenuLayer::targetContentScrollY() const
     case Item::Display:
     {
         const int row = std::clamp(m_contentFocus, 0, contentControlCount(Item::Display) - 1);
-        const float contentH = displayRowY(14) + kSettingRowH;
+        const float contentH = displayRowY(DisplayRowCount - 1) + kSettingRowH;
         return focusedScroll(displayRowY(row), kSettingRowH, contentH);
     }
     case Item::Cheats:
@@ -1046,7 +1026,7 @@ void NdsMenuLayer::setDisplaySettings(const NdsDisplaySettings& settings)
 {
     m_display = settings;
     m_display.fastForwardMultiplier = std::clamp(m_display.fastForwardMultiplier, 0.1f, 5.0f);
-    m_display.renderScale = std::clamp(m_display.renderScale, 1, 4);
+    m_display.renderScale = std::clamp(m_display.renderScale, 1, Fulldex::MaxScale());
     m_display.layout = std::clamp(m_display.layout, 0, 7);
     m_display.orientation = std::clamp(m_display.orientation, 0, 3);
     m_display.screenGap = clampScreenGap(m_display.screenGap);
@@ -1078,7 +1058,7 @@ int NdsMenuLayer::contentControlCount(Item item) const
     case Item::LoadState:
         return 10;
     case Item::Display:
-        return 15;
+        return DisplayRowCount;
     case Item::Cheats:
         return static_cast<int>(visibleCheatIndices().size());
     default:
@@ -1144,7 +1124,7 @@ int NdsMenuLayer::nextFocusableDisplayRow(int from, int direction) const
     for (int i = 0; i < contentControlCount(Item::Display); ++i)
     {
         row = (row + direction + contentControlCount(Item::Display)) % contentControlCount(Item::Display);
-        if (row == kDisplayRowCustomLayout && m_display.layout != 7)
+        if (row == RowCustomLayout && m_display.layout != 7)
             continue;
         return row;
     }
@@ -1155,27 +1135,27 @@ bool NdsMenuLayer::activateDisplayControl()
 {
     switch (m_contentFocus)
     {
-    case 3:
+    case RowIntegerScale:
         m_display.integerScale = !m_display.integerScale;
         return true;
-    case 7:
+    case RowScreenGap:
         if (m_display.screenGap == kScreenGapDefault)
             return false;
         m_display.screenGap = kScreenGapDefault;
         return true;
-    case kDisplayRowCustomLayout:
+    case RowCustomLayout:
         if (m_display.layout == 7)
             beginCustomLayoutEditor();
         return false;
-    case kDisplayRowOverlay:
+    case RowOverlay:
         beginOverlaySidebar();
         return false;
-    case kDisplayRowShader:
+    case RowShader:
         beginShaderSidebar();
         return false;
-    case kDisplayRowSyncDisplay:
-    case kDisplayRowSyncOverlay:
-    case kDisplayRowSyncShader:
+    case RowSyncDisplay:
+    case RowSyncOverlay:
+    case RowSyncShader:
         return false;
     default:
         return false;
@@ -1409,7 +1389,7 @@ bool NdsMenuLayer::cycleCurrentSetting(int direction)
 
     switch (m_contentFocus)
     {
-    case 0:
+    case RowFastForward:
     {
         int idx = 2;
         for (int i = 0; i < static_cast<int>(std::size(kFastForwardValues)); ++i)
@@ -1424,21 +1404,21 @@ bool NdsMenuLayer::cycleCurrentSetting(int direction)
         m_display.fastForwardMultiplier = kFastForwardValues[idx];
         return true;
     }
-    case 1:
+    case RowFilter:
         m_display.linearFiltering = !m_display.linearFiltering;
         return true;
-    case 2:
-        m_display.renderScale = cycleIndex(m_display.renderScale - 1, 4) + 1;
+    case RowResolution:
+        m_display.renderScale = cycleIndex(m_display.renderScale - 1, Fulldex::MaxScale()) + 1;
         return true;
-    case 4:
+    case RowLayout:
         m_display.layout = cycleIndex(m_display.layout, 8);
-        if (m_contentFocus == kDisplayRowCustomLayout && m_display.layout != 7)
+        if (m_contentFocus == RowCustomLayout && m_display.layout != 7)
             m_contentFocus = nextFocusableDisplayRow(m_contentFocus, direction);
         return true;
-    case 6:
+    case RowOrientation:
         m_display.orientation = cycleIndex(m_display.orientation, 4);
         return true;
-    case 7:
+    case RowScreenGap:
         m_display.screenGap = stepNumericValue(m_display.screenGap,
                                                direction,
                                                kScreenGapStep,
@@ -1653,7 +1633,7 @@ NdsMenuResult NdsMenuLayer::update(std::uint64_t buttonsDown, std::uint64_t butt
         m_customLayoutReturnToMenu = false;
         m_selectorDirection = 0;
         if (returnToMenu)
-            reopenDisplayContent(kDisplayRowCustomLayout);
+            reopenDisplayContent(RowCustomLayout);
     }
 
     if (m_overlaySidebarVisible && m_overlaySidebarClosing &&
@@ -1665,7 +1645,7 @@ NdsMenuResult NdsMenuLayer::update(std::uint64_t buttonsDown, std::uint64_t butt
         m_overlaySidebarReturnToMenu = false;
         m_selectorDirection = 0;
         if (returnToMenu)
-            reopenDisplayContent(kDisplayRowOverlay);
+            reopenDisplayContent(RowOverlay);
     }
 
     if (m_shaderSidebarVisible && m_shaderSidebarClosing &&
@@ -1677,7 +1657,7 @@ NdsMenuResult NdsMenuLayer::update(std::uint64_t buttonsDown, std::uint64_t butt
         m_shaderSidebarReturnToMenu = false;
         m_selectorDirection = 0;
         if (returnToMenu)
-            reopenDisplayContent(kDisplayRowShader);
+            reopenDisplayContent(RowShader);
     }
 
     if (m_filePickerVisible && m_filePickerClosing &&
@@ -2168,31 +2148,31 @@ NdsMenuResult NdsMenuLayer::update(std::uint64_t buttonsDown, std::uint64_t butt
 
             if (buttonsDown & HidNpadButton_A)
             {
-                if (m_contentFocus == kDisplayRowLid)
+                if (m_contentFocus == RowLid)
                 {
                     queueSound(NdsMenuSound::Click);
                     m_lidClosed = !m_lidClosed;
                     return {NdsMenuAction::LidChanged, -1};
                 }
-                if (m_contentFocus == kDisplayRowNoSync)
+                if (m_contentFocus == RowNoSync)
                 {
                     queueSound(NdsMenuSound::Click);
                     m_display.noSync = !m_display.noSync;
                     return {NdsMenuAction::NoSyncChanged, -1};
                 }
-                if (m_contentFocus == kDisplayRowSyncDisplay)
+                if (m_contentFocus == RowSyncDisplay)
                 {
                     queueSound(NdsMenuSound::Click);
                     openSyncConfirmDialog(NdsMenuAction::SyncDisplaySettings);
                     return {};
                 }
-                if (m_contentFocus == kDisplayRowSyncOverlay)
+                if (m_contentFocus == RowSyncOverlay)
                 {
                     queueSound(NdsMenuSound::Click);
                     openSyncConfirmDialog(NdsMenuAction::SyncOverlaySettings);
                     return {};
                 }
-                if (m_contentFocus == kDisplayRowSyncShader)
+                if (m_contentFocus == RowSyncShader)
                 {
                     queueSound(NdsMenuSound::Click);
                     openSyncConfirmDialog(NdsMenuAction::SyncShaderSettings);
@@ -2200,9 +2180,9 @@ NdsMenuResult NdsMenuLayer::update(std::uint64_t buttonsDown, std::uint64_t butt
                 }
             }
             const bool opensDisplaySubPage =
-                (m_contentFocus == kDisplayRowCustomLayout && m_display.layout == 7) ||
-                m_contentFocus == kDisplayRowOverlay ||
-                m_contentFocus == kDisplayRowShader;
+                (m_contentFocus == RowCustomLayout && m_display.layout == 7) ||
+                m_contentFocus == RowOverlay ||
+                m_contentFocus == RowShader;
             if ((buttonsDown & HidNpadButton_A) && activateDisplayControl())
             {
                 queueSound(NdsMenuSound::Click);
@@ -2210,7 +2190,7 @@ NdsMenuResult NdsMenuLayer::update(std::uint64_t buttonsDown, std::uint64_t butt
             }
             if ((buttonsDown & HidNpadButton_A) && opensDisplaySubPage)
                 queueSound(NdsMenuSound::Click);
-            else if ((buttonsDown & HidNpadButton_A) && m_contentFocus == kDisplayRowCustomLayout)
+            else if ((buttonsDown & HidNpadButton_A) && m_contentFocus == RowCustomLayout)
                 queueSound(NdsMenuSound::Error);
             return {};
         }

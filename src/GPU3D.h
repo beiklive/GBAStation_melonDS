@@ -91,6 +91,7 @@ extern u8 RenderFogDensityTable[34];
 extern u32 RenderClearAttr1, RenderClearAttr2;
 
 extern bool RenderFrameIdentical;
+extern u64 GeometrySerial, GeometryEpoch; // presentation history only
 
 extern u16 RenderXPos;
 

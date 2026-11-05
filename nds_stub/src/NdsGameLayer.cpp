@@ -1,4 +1,5 @@
 #include "nds_stub/NdsGameLayer.hpp"
+#include "fulldex/Presentation.h"
 
 #include <algorithm>
 #include <cmath>
@@ -209,10 +210,17 @@ float clampGap(float gap, float available)
 void NdsGameLayer::init(GPU2D::DekoRenderer* renderer)
 {
     m_renderer = renderer;
+    refreshFramebufferTextures();
+}
+
+void NdsGameLayer::refreshFramebufferTextures()
+{
     for (int front = 0; front < 2; ++front)
     {
         for (int screen = 0; screen < 2; ++screen)
         {
+            if (m_framebufferTextures[front][screen])
+                Gfx::TextureDelete(m_framebufferTextures[front][screen]);
             m_framebufferTextures[front][screen] =
                 Gfx::TextureCreateExternal(m_renderer->GetFramebufferTextureWidth(),
                                            m_renderer->GetFramebufferTextureHeight(),
@@ -903,6 +911,9 @@ void NdsGameLayer::drawScreens() const
     int passCount = 0;
     int passTempScale = 1;
     const bool useMultiPassShader = useShader && ndsShaderPassChain(m_shaderType, passChain, passCount, passTempScale);
+    // Post-processing must not request another 2x upscale of an already high-resolution image.
+    if (!useFreeze && useMultiPassShader && liveSrcWidth * passTempScale > 256 * Fulldex::MaxScale())
+        passChain[0].OutputScale = passTempScale = 1;
     const u32 screenSampler = (useShader ? Gfx::sampler_Nearest :
                               (m_linearFiltering ? Gfx::sampler_Linear : Gfx::sampler_Nearest)) |
                               Gfx::sampler_ClampToEdge;

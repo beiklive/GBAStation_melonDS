@@ -79,7 +79,7 @@ DekoRenderer::DekoRenderer()
     : Renderer3D(false),
     CmdMem(*Gfx::DataHeap, 1024*128)
 {
-    DekoLog("GBAStationNDSStub: GPU3D_Deko ctor scale-capable max=%d", MaxScaleFactor);
+    DekoLog("GBAStationNDSStub: GPU3D_Deko ctor native capture scale=%d", MaxScaleFactor);
 }
 
 DekoRenderer::~DekoRenderer()
@@ -153,13 +153,13 @@ bool DekoRenderer::LoadShaders(int scale)
 
 std::size_t DekoRenderer::SortWorkWorkCountOffset() const
 {
-    return sizeof(u32) * (MaxVariants * 4 + MaxVariants);
+    return sizeof(u32) * (MaxVariants * 4 + MaxVariants * 2);
 }
 
 std::size_t DekoRenderer::BinResultSize() const
 {
     const std::size_t tileCount = static_cast<std::size_t>(TilesPerLine) * TileLines;
-    return sizeof(u32) * (MaxVariants * 4 + MaxVariants + 4 +
+    return sizeof(u32) * (MaxVariants * 4 + MaxVariants * 2 + 4 +
                           static_cast<std::size_t>(MaxWorkTiles) * 4 +
                           tileCount * (CoarseBinStride + BinStride * 2));
 }
@@ -317,6 +317,7 @@ bool DekoRenderer::Init()
 
     MetaUniformMemory = Gfx::DataHeap->Alloc(MetaUniformSize, DK_UNIFORM_BUF_ALIGNMENT);
 
+    Presentation.Init();
     DekoLog("GBAStationNDSStub: GPU3D_Deko init ok");
     return true;
 }
@@ -324,11 +325,13 @@ bool DekoRenderer::Init()
 void DekoRenderer::DeInit()
 {
     Gfx::EmuQueue.waitIdle();
+    Presentation.DeInit();
     FreeScaleResources();
 }
 
 void DekoRenderer::Reset()
 {
+    Presentation.Reset();
     for (u32 i = 0; i < 8; i++)
     {
         for (u32 j = 0; j < 8; j++)
@@ -351,11 +354,6 @@ void DekoRenderer::Reset()
 void DekoRenderer::SetRenderSettings(GPU::RenderSettings& settings)
 {
     BetterPolygons = settings.GL_BetterPolygons;
-    DekoLog("GBAStationNDSStub: GPU3D_Deko render settings scale=%d betterPolygons=%d effectiveHires=%d",
-            settings.GL_ScaleFactor, BetterPolygons ? 1 : 0,
-            (BetterPolygons && settings.GL_ScaleFactor > 1) ? 1 : 0);
-    if (!AllocateScaleResources(settings.GL_ScaleFactor))
-        DekoLog("GBAStationNDSStub: GPU3D_Deko render settings shader allocation FAILED");
 }
 
 void DekoRenderer::VCount144()
@@ -1153,6 +1151,15 @@ void DekoRenderer::RenderFrame()
 
     bool textureChanged = GPU::MakeVRAMFlat_TextureCoherent(textureDirty);
     bool texPalChanged = GPU::MakeVRAMFlat_TexPalCoherent(texPalDirty);
+    {
+        auto* compositor = static_cast<GPU2D::DekoRenderer*>(GPU::GPU2D_Renderer.get());
+        if (textureChanged || texPalChanged)
+            Fulldex::TextureChanged(textureDirty.Data, texPalDirty.Data);
+        compositor->PresentEnhanced = Presentation.Render(compositor->EnhancedImage,
+            compositor->GetRenderScale(), textureChanged || texPalChanged);
+        ++Fulldex::DisplayFrames;
+        if (!compositor->PresentEnhanced) ++Fulldex::NativeFrames;
+    }
     bool textureLayerRecycled = false;
 
     if ((textureChanged || texPalChanged) && !DebugFreezeTextureCache)

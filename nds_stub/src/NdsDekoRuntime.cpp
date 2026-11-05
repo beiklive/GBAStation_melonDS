@@ -1,8 +1,10 @@
+#include "fulldex/Presentation.h"
 #include "nds_stub/NdsDekoRuntime.hpp"
 
 #include "nds_stub/NdsCheatDatabase.hpp"
 #include "nds_stub/NdsGameLayer.hpp"
 #include "nds_stub/NdsMenuLayer.hpp"
+#include "nds_stub/NdsLanguage.hpp"
 #include "nds_stub/NdsShaderCatalog.hpp"
 #include "nds_stub/NdsUiAudio.hpp"
 #include "nds_stub/ui/UiComponents.hpp"
@@ -1885,7 +1887,6 @@ public:
 
     bool saveValue(const std::string& key, const std::string& type, const std::string& value)
     {
-        setValue(key, value);
         std::string path = m_loadedPath.empty() ? "sdmc:/GBAStation/config/config.cfg" : m_loadedPath;
         std::vector<std::string> lines;
         {
@@ -1917,7 +1918,10 @@ public:
             return false;
         for (const std::string& line : lines)
             out << line << '\n';
-        return out.good();
+        out.close();
+        if (!out) return false;
+        setValue(key, value);
+        return true;
     }
 
     bool fastForwardEnabled() const { return intValue("fastforward.enabled", 1) != 0; }
@@ -2592,7 +2596,7 @@ int RunDekoRuntime(const DekoRunOptions& options)
     appendStubLog("GBAStationNDSStub: Deko checkpoint GPU::InitRenderer ok ms=%lld", elapsedMs(checkpointBegin));
     GPU::RenderSettings settings {
         inputConfig.intValue("core.melonds_threaded_renderer", 1) != 0,
-        std::clamp(inputConfig.intValue("core.melonds_render_scale", 1), 1, 4),
+        std::clamp(inputConfig.intValue("core.melonds_render_scale", 1), 1, Fulldex::MaxScale()),
         inputConfig.intValue("core.melonds_better_polygons", 0) != 0};
     appendStubLog("GBAStationNDSStub: Deko checkpoint GPU::SetRenderSettings begin");
     checkpointBegin = std::chrono::steady_clock::now();
@@ -2642,7 +2646,7 @@ int RunDekoRuntime(const DekoRunOptions& options)
     NdsDisplaySettings initialDisplay {};
     initialDisplay.fastForwardMultiplier = inputConfig.fastForwardMultiplier();
     initialDisplay.linearFiltering = inputConfig.value("display.filter", "nearest") == "linear";
-    initialDisplay.renderScale = std::clamp(inputConfig.intValue("core.melonds_render_scale", 1), 1, 4);
+    initialDisplay.renderScale = deko2d->GetRenderScale();
     initialDisplay.integerScale = options.integerScale;
     initialDisplay.layout = layoutIndexFromId(options.screenLayout.empty() ? "priority_top" : options.screenLayout);
     initialDisplay.orientation = orientationIndexFromId(options.screenOrientation.empty() ? "0" : options.screenOrientation);
@@ -2664,7 +2668,12 @@ int RunDekoRuntime(const DekoRunOptions& options)
     gameLayer.setShaderEnabled(initialDisplay.shaderEnabled);
     gameLayer.setShaderType(initialDisplay.ndsShaderType);
     gameLayer.setShaderParams(ndsShaderParamUniforms(initialDisplay.ndsShaderType, initialDisplay.shaderParams));
-    int appliedRenderScale = initialDisplay.renderScale;
+    int requestedRenderScale = initialDisplay.renderScale;
+    if (requestedRenderScale != settings.GL_ScaleFactor) {
+        menuLayer.showToast(NDS_L("显存不足，已保留原倍率"));
+        if (!inputConfig.saveValue("core.melonds_render_scale", "i", std::to_string(requestedRenderScale)))
+            appendStubLog("GBAStationNDSStub: could not persist startup fallback scale=%d", requestedRenderScale);
+    }
     bool appliedOverlayValid = false;
     bool appliedOverlayEnabled = false;
     std::string appliedOverlayPath;
@@ -3151,15 +3160,11 @@ int RunDekoRuntime(const DekoRunOptions& options)
         }
         else if (menuAction == NdsMenuAction::DisplaySettingsChanged)
         {
-            const int requestedRenderScale = std::clamp(menuLayer.displaySettings().renderScale, 1, 4);
-            if (requestedRenderScale != appliedRenderScale)
-            {
-                GPU::RenderSettings renderSettings {
-                    inputConfig.intValue("core.melonds_threaded_renderer", 1) != 0,
-                    requestedRenderScale,
-                    inputConfig.intValue("core.melonds_better_polygons", 0) != 0};
-                GPU::SetRenderSettings(0, renderSettings);
-                appliedRenderScale = requestedRenderScale;
+            const int selection = std::clamp(menuLayer.displaySettings().renderScale, 1, Fulldex::MaxScale());
+            if (requestedRenderScale != selection) {
+                requestedRenderScale = selection;
+                if (!inputConfig.saveValue("core.melonds_render_scale", "i", std::to_string(selection)))
+                    menuLayer.showToast(NDS_L("无法保存画面设置"));
             }
             gameLayer.setLinearFiltering(menuLayer.linearFiltering());
             gameLayer.setIntegerScale(menuLayer.integerScale());
@@ -3409,6 +3414,22 @@ int RunDekoRuntime(const DekoRunOptions& options)
             fastForwardFrameCredit = 0.0;
         }
         const bool emulationPaused = menuActive || runtimePaused;
+        // Keep the paused framebuffer available to the menu. Apply only the final
+        // selection, immediately before emulation can draw the replacement.
+        if (!emulationPaused && framesToRun > 0 && requestedRenderScale != deko2d->GetRenderScale()) {
+            deko2d->SetRenderScale(requestedRenderScale);
+            if (deko2d->GetRenderScale() == requestedRenderScale) {
+                gameLayer.refreshFramebufferTextures();
+            } else {
+                requestedRenderScale = deko2d->GetRenderScale();
+                auto display = menuLayer.displaySettings();
+                display.renderScale = requestedRenderScale;
+                menuLayer.setDisplaySettings(display);
+                if (!inputConfig.saveValue("core.melonds_render_scale", "i", std::to_string(requestedRenderScale)))
+                    appendStubLog("GBAStationNDSStub: could not persist fallback scale=%d", requestedRenderScale);
+                menuLayer.showToast(NDS_L("显存不足，已保留原倍率"));
+            }
+        }
         int framesRan = 0;
         for (int i = 0; i < framesToRun && !emulationPaused; ++i)
         {
@@ -3634,6 +3655,11 @@ int RunDekoRuntime(const DekoRunOptions& options)
                           menuLayer.linearFiltering() ? "linear" : "nearest");
         }
         const auto now = std::chrono::steady_clock::now();
+        if (totalFrames % 600 == 0) {
+            appendStubLog("3D: target=%dx%d frames=%u native=%u",
+                          deko2d->GetFramebufferWidth(), deko2d->GetFramebufferHeight(), Fulldex::DisplayFrames,
+                          Fulldex::NativeFrames);
+        }
         const auto fpsElapsed = std::chrono::duration_cast<std::chrono::milliseconds>(now - fpsStart).count();
         if (fpsElapsed >= 1000)
         {

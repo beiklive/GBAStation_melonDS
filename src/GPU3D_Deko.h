@@ -2,6 +2,7 @@
 #define GPU3D_DEKO
 
 #include "GPU3D.h"
+#include "fulldex/Presenter.h"
 
 #include <deko3d.hpp>
 
@@ -39,7 +40,8 @@ public:
     //dk::Fence FrameReady = {};
     //dk::Fence FrameReserveFence = {};
 private:
-    static constexpr int MaxScaleFactor = 4;
+    Fulldex::Presenter Presentation;
+    static constexpr int MaxScaleFactor = 1;
     dk::Shader ShaderInterpXSpans[MaxScaleFactor][2];
     dk::Shader ShaderBinCombined[MaxScaleFactor];
     dk::Shader ShaderDepthBlend[MaxScaleFactor][2];

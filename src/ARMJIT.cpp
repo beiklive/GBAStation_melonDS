@@ -621,6 +621,8 @@ void CompileBlock(ARM* cpu)
     u32 numAddressRanges = 0;
 
     u32 numLiterals = 0;
+    u32 writeAddresses[Config::JIT_MaxBlockSize];
+    u32 numWrites = 0;
     u32 literalLoadAddrs[Config::JIT_MaxBlockSize];
     // they are going to be hashed
     u32 literalValues[Config::JIT_MaxBlockSize];
@@ -749,23 +751,25 @@ void CompileBlock(ARM* cpu)
             && DecodeLiteral(thumb, instrs[i], literalAddr))
         {
             u32 translatedAddr = LocaliseCodeAddress(cpu->Num, literalAddr);
-            if (!translatedAddr)
+            if (translatedAddr && InvalidLiterals.Find(translatedAddr) == -1)
             {
-                printf("literal in non executable memory?\n");
-            }
-            u32 translatedAddrRounded = translatedAddr & ~0x1FF;
+                u32 translatedAddrRounded = translatedAddr & ~0x1FF;
 
-            u32 j = 0;
-            for (; j < numAddressRanges; j++)
-                if (addressRanges[j] == translatedAddrRounded)
-                    break;
-            if (j == numAddressRanges)
-                addressRanges[numAddressRanges++] = translatedAddrRounded;
-            addressMasks[j] |= 1 << ((translatedAddr & 0x1FF) / 16);
-            JIT_DEBUGPRINT("literal loading %08x %08x %08x %08x\n", literalAddr, translatedAddr, addressMasks[j], addressRanges[j]);
-            cpu->DataRead32(literalAddr, &literalValues[numLiterals]);
-            literalLoadAddrs[numLiterals++] = translatedAddr;
+                u32 j = 0;
+                for (; j < numAddressRanges; j++)
+                    if (addressRanges[j] == translatedAddrRounded)
+                        break;
+                if (j == numAddressRanges)
+                    addressRanges[numAddressRanges++] = translatedAddrRounded;
+                addressMasks[j] |= 1 << ((translatedAddr & 0x1FF) / 16);
+                JIT_DEBUGPRINT("literal loading %08x %08x %08x %08x\n", literalAddr, translatedAddr, addressMasks[j], addressRanges[j]);
+                cpu->DataRead32(literalAddr, &literalValues[numLiterals]);
+                literalLoadAddrs[numLiterals++] = translatedAddr;
+            }
         }
+
+        if (Config::JIT_LiteralOptimisations && instrs[i].Info.SpecialKind == ARMInstrInfo::special_WriteMem)
+            writeAddresses[numWrites++] = instrs[i].DataRegion;
 
         if (thumb && instrs[i].Info.Kind == ARMInstrInfo::tk_BL_LONG_2 && i > 0
             && instrs[i - 1].Info.Kind == ARMInstrInfo::tk_BL_LONG_1)
@@ -858,6 +862,18 @@ void CompileBlock(ARM* cpu)
             FloodFillSetFlags(instrs, i - 2, !secondaryFlagReadCond ? instrs[i - 1].Info.ReadFlags : 0xF);
     } while(!instrs[i - 1].Info.EndBlock && i < Config::JIT_MaxBlockSize && !cpu->Halted && (!cpu->IRQ || (cpu->CPSR & 0x80)));
 
+    // A write in the block may change a literal before a later load. This
+    // block must compile those accesses as loads, including its first run.
+    bool writesLiteral = false;
+    for (u32 j = 0; numLiterals && j < numWrites; ++j) {
+        u32 addr = LocaliseCodeAddress(cpu->Num, writeAddresses[j]);
+        for (u32 k = 0; addr && k < numLiterals; ++k) {
+            if ((addr & ~3u) != (literalLoadAddrs[k] & ~3u)) continue;
+            u32 literal = literalLoadAddrs[k];
+            if (InvalidLiterals.Find(literal) == -1) InvalidLiterals.Add(literal);
+            writesLiteral = true;
+        }
+    }
     u32 literalHash = (u32)XXH3_64bits(literalValues, numLiterals * 4);
     u32 instrHash = (u32)XXH3_64bits(instrValues, numInstrs * 4);
 
@@ -869,7 +885,8 @@ void CompileBlock(ARM* cpu)
         prevBlock = prevBlockIt->second;
         RestoreCandidates.erase(prevBlockIt);
 
-        mayRestore = prevBlock->StartAddr == blockAddr && prevBlock->LiteralHash == literalHash;
+        mayRestore = !writesLiteral && prevBlock->StartAddr == blockAddr &&
+                     prevBlock->NumLiterals == numLiterals && prevBlock->LiteralHash == literalHash;
 
         if (mayRestore && prevBlock->NumAddresses == numAddressRanges)
         {
@@ -957,7 +974,7 @@ void InvalidateByAddr(u32 localAddr)
 
     AddressRange* region = CodeMemRegions[localAddr >> 27];
     AddressRange* range = &region[(localAddr & 0x7FFFFFF) / 512];
-    u32 mask = 1 << ((localAddr & 0x1FF) / 16);
+    const u32 writtenMask = 1u << ((localAddr & 0x1FF) / 16);
 
     range->Code = 0;
     for (int i = 0; i < range->Blocks.Length;)
@@ -971,7 +988,7 @@ void InvalidateByAddr(u32 localAddr)
             if (block->AddressRanges()[j] == (localAddr & ~0x1FF))
             {
                 mask = block->AddressMasks()[j];
-                invalidated = block->AddressMasks()[j] & mask;
+                invalidated = (writtenMask & mask) != 0;
                 assert(mask);
                 break;
             }
@@ -995,11 +1012,11 @@ void InvalidateByAddr(u32 localAddr)
         for (int j = 0; j < block->NumLiterals; j++)
         {
             u32 addr = block->Literals()[j];
-            if (addr == localAddr)
+            if ((addr & ~3u) == (localAddr & ~3u))
             {
-                if (InvalidLiterals.Find(localAddr) != -1)
+                if (InvalidLiterals.Find(addr) == -1)
                 {
-                    InvalidLiterals.Add(localAddr);
+                    InvalidLiterals.Add(addr);
                     JIT_DEBUGPRINT("found invalid literal %d\n", InvalidLiterals.Length);
                 }
                 literalInvalidation = true;

@@ -199,16 +199,16 @@ foreach(instance IN LISTS NDS_STUB_GPU3D_SHADER_INSTANCES)
     nds_stub_compile_legacy_3d_shader_instance(comp ${ARCDELTA_CORE_SHADER_DIR}/GPU3D_Comp ${output_name} "${instance_defines}")
 endforeach()
 
-foreach(scale RANGE 1 4)
-    foreach(instance IN LISTS NDS_STUB_GPU3D_SHADER_INSTANCES)
-        string(REPLACE "|" ";" instance_parts "${instance}")
-        list(GET instance_parts 0 output_name)
-        list(REMOVE_AT instance_parts 0)
-        string(REPLACE "," ";" instance_defines "${instance_parts}")
-        nds_stub_compile_3d_shader_instance(comp ${ARCDELTA_CORE_SHADER_DIR}/GPU3D_Comp ${output_name} "${instance_defines}" ${scale})
-    endforeach()
+# Only native capture uses the compute shaders. All display scales share the graphics pipeline.
+foreach(instance IN LISTS NDS_STUB_GPU3D_SHADER_INSTANCES)
+    string(REPLACE "|" ";" instance_parts "${instance}")
+    list(GET instance_parts 0 output_name)
+    list(REMOVE_AT instance_parts 0)
+    string(REPLACE "," ";" instance_defines "${instance_parts}")
+    nds_stub_compile_3d_shader_instance(comp ${ARCDELTA_CORE_SHADER_DIR}/GPU3D_Comp ${output_name} "${instance_defines}" 1)
 endforeach()
 
+include("${CMAKE_SOURCE_DIR}/src/fulldex/Shaders.cmake")
 add_custom_target(GBAStationNDSStubDekoShaders DEPENDS ${NDS_STUB_DEKO_SHADERS})
 
 add_executable(GBAStationNDSStub

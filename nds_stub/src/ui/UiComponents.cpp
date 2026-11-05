@@ -1,3 +1,4 @@
+#include "fulldex/Presentation.h"
 #include "nds_stub/ui/UiComponents.hpp"
 #include "nds_stub/NdsLanguage.hpp"
 
@@ -1242,15 +1243,8 @@ void drawInfoPage(const char* title, const char* body, float offsetX, float offs
     Gfx::DrawText(Gfx::SystemFontChinese, base + Vector2f{0.0f, 104.0f}, 26.0f, bodyColor, "%s", body);
 }
 
-void drawDisplayPage(bool linearFiltering,
-                     float fastForwardMultiplier,
-                     int renderScale,
-                     bool integerScale,
-                     int layout,
-                     int orientation,
-                     int screenGap,
+void drawDisplayPage(const NdsDisplaySettings& display,
                      bool lidClosed,
-                     bool noSync,
                      int focusedRow,
                      bool contentFocused,
                      float offsetX,
@@ -1263,47 +1257,47 @@ void drawDisplayPage(bool linearFiltering,
     drawLine({base.X, base.Y + 50.0f}, {kContentW, 1.0f}, {1.0f, 1.0f, 1.0f, 0.10f * opacity});
 
     char ffValue[24];
-    if (fastForwardMultiplier < 1.0f)
-        std::snprintf(ffValue, sizeof(ffValue), "%.1fx", fastForwardMultiplier);
-    else if (std::fabs(fastForwardMultiplier - std::round(fastForwardMultiplier)) < 0.01f)
-        std::snprintf(ffValue, sizeof(ffValue), "%.0fx", fastForwardMultiplier);
+    if (display.fastForwardMultiplier < 1.0f)
+        std::snprintf(ffValue, sizeof(ffValue), "%.1fx", display.fastForwardMultiplier);
+    else if (std::fabs(display.fastForwardMultiplier - std::round(display.fastForwardMultiplier)) < 0.01f)
+        std::snprintf(ffValue, sizeof(ffValue), "%.0fx", display.fastForwardMultiplier);
     else
-        std::snprintf(ffValue, sizeof(ffValue), "%.2fx", fastForwardMultiplier);
+        std::snprintf(ffValue, sizeof(ffValue), "%.2fx", display.fastForwardMultiplier);
     pushContentBodyScissor(offsetY);
 
     float y = kContentBodyTop - scrollY;
     auto rowPos = [&](float rowY) { return base + Vector2f{0.0f, rowY}; };
-    drawLrSelectorRow(rowPos(y), NDS_L("快进倍率"), ffValue, contentFocused && focusedRow == 0, true, opacity); y += kSettingStepY;
-    drawLrSelectorRow(rowPos(y), NDS_L("画面过滤"), filterLabel(linearFiltering), contentFocused && focusedRow == 1, true, opacity); y += kSettingStepY;
+    drawLrSelectorRow(rowPos(y), NDS_L("快进倍率"), ffValue, contentFocused && focusedRow == RowFastForward, true, opacity); y += kSettingStepY;
+    drawLrSelectorRow(rowPos(y), NDS_L("画面过滤"), filterLabel(display.linearFiltering), contentFocused && focusedRow == RowFilter, true, opacity); y += kSettingStepY;
     char renderScaleValue[16];
-    std::snprintf(renderScaleValue, sizeof(renderScaleValue), "%dx", std::clamp(renderScale, 1, 4));
-    drawLrSelectorRow(rowPos(y), NDS_L("3D分辨率"), renderScaleValue, contentFocused && focusedRow == 2, true, opacity);
+    std::snprintf(renderScaleValue, sizeof(renderScaleValue), "%dx", std::clamp(display.renderScale, 1, Fulldex::MaxScale()));
+    drawLrSelectorRow(rowPos(y), NDS_L("3D分辨率"), renderScaleValue, contentFocused && focusedRow == RowResolution, true, opacity);
     Gfx::DrawText(Gfx::SystemFontChinese,
                   rowPos(y) + Vector2f{0.0f, 56.0f},
                   15.0f,
                   {1.0f, 0.22f, 0.20f, 0.95f * opacity},
-                  NDS_L("  注意：1-3倍为安全分辨率，4倍可能导致卡顿、内存不足或崩溃，请酌情使用"));
+                  NDS_L("倍率越高，GPU 负载越高。10 倍为 2560×1920。"));
     y += kSettingStepY + 34.0f;
-    drawSwitchRow(rowPos(y), NDS_L("整数倍缩放"), integerScale, contentFocused && focusedRow == 3, opacity); y += kSettingStepY;
-    drawLrSelectorRow(rowPos(y), NDS_L("画面布局"), layoutLabel(layout), contentFocused && focusedRow == 4, true, opacity); y += kSettingStepY;
-    drawSubPageRow(rowPos(y), NDS_L("自定义画面布局"), contentFocused && focusedRow == 5, layout == 7, opacity); y += kSettingStepY;
-    drawLrSelectorRow(rowPos(y), NDS_L("画面方向"), orientationLabel(orientation), contentFocused && focusedRow == 6, true, opacity); y += kSettingStepY;
-    drawNumberAdjusterRow(rowPos(y), NDS_L("屏幕间距"), screenGap, "px", 0, 1, contentFocused && focusedRow == 7, true, opacity); y += 65.0f;
+    drawSwitchRow(rowPos(y), NDS_L("整数倍缩放"), display.integerScale, contentFocused && focusedRow == RowIntegerScale, opacity); y += kSettingStepY;
+    drawLrSelectorRow(rowPos(y), NDS_L("画面布局"), layoutLabel(display.layout), contentFocused && focusedRow == RowLayout, true, opacity); y += kSettingStepY;
+    drawSubPageRow(rowPos(y), NDS_L("自定义画面布局"), contentFocused && focusedRow == RowCustomLayout, display.layout == 7, opacity); y += kSettingStepY;
+    drawLrSelectorRow(rowPos(y), NDS_L("画面方向"), orientationLabel(display.orientation), contentFocused && focusedRow == RowOrientation, true, opacity); y += kSettingStepY;
+    drawNumberAdjusterRow(rowPos(y), NDS_L("屏幕间距"), display.screenGap, "px", 0, 1, contentFocused && focusedRow == RowScreenGap, true, opacity); y += 65.0f;
     drawSectionLabel(rowPos(y + 2.0f), NDS_L("个性化设置"), opacity); y += 36.0f;
-    drawSubPageRow(rowPos(y), NDS_L("遮罩选择"), contentFocused && focusedRow == 8, true, opacity); y += kSettingStepY;
-    drawSubPageRow(rowPos(y), NDS_L("滤镜选择"), contentFocused && focusedRow == 9, true, opacity); y += kSettingStepY;
-    drawSwitchRow(rowPos(y), NDS_L("模拟合盖"), lidClosed, contentFocused && focusedRow == 10, opacity); y += 65.0f;
+    drawSubPageRow(rowPos(y), NDS_L("遮罩选择"), contentFocused && focusedRow == RowOverlay, true, opacity); y += kSettingStepY;
+    drawSubPageRow(rowPos(y), NDS_L("滤镜选择"), contentFocused && focusedRow == RowShader, true, opacity); y += kSettingStepY;
+    drawSwitchRow(rowPos(y), NDS_L("模拟合盖"), lidClosed, contentFocused && focusedRow == RowLid, opacity); y += 65.0f;
     drawSectionLabel(rowPos(y + 2.0f), NDS_L("同步设置"), opacity); y += 36.0f;
-    drawSwitchRow(rowPos(y), NDS_L("锁定本游戏配置"), noSync, contentFocused && focusedRow == 11, opacity);
+    drawSwitchRow(rowPos(y), NDS_L("锁定本游戏配置"), display.noSync, contentFocused && focusedRow == RowNoSync, opacity);
     Gfx::DrawText(Gfx::SystemFontChinese,
                   rowPos(y) + Vector2f{0.0f, 56.0f},
                   15.0f,
                   {0.72f, 0.82f, 0.92f, 0.95f * opacity},
                   NDS_L("  开启后同平台同步操作将跳过本游戏"));
     y += kSettingStepY + 34.0f;
-    drawButtonRow(rowPos(y), NDS_L("同步画面设置"), contentFocused && focusedRow == 12, opacity); y += kSettingStepY;
-    drawButtonRow(rowPos(y), NDS_L("同步遮罩设置"), contentFocused && focusedRow == 13, opacity); y += kSettingStepY;
-    drawButtonRow(rowPos(y), NDS_L("同步滤镜设置"), contentFocused && focusedRow == 14, opacity);
+    drawButtonRow(rowPos(y), NDS_L("同步画面设置"), contentFocused && focusedRow == RowSyncDisplay, opacity); y += kSettingStepY;
+    drawButtonRow(rowPos(y), NDS_L("同步遮罩设置"), contentFocused && focusedRow == RowSyncOverlay, opacity); y += kSettingStepY;
+    drawButtonRow(rowPos(y), NDS_L("同步滤镜设置"), contentFocused && focusedRow == RowSyncShader, opacity);
 
     if (opacity > 0.5f && scrollY > 1.0f)
         drawRect({kContentX + kContentW - 4.0f, kContentY + kContentBodyTop + offsetY},
@@ -1976,15 +1970,8 @@ void drawTabFrame(NdsMenuLayer::Item item,
                               offsetY);
             break;
         case NdsMenuLayer::Item::Display:
-            drawDisplayPage(display.linearFiltering,
-                            display.fastForwardMultiplier,
-                            display.renderScale,
-                            display.integerScale,
-                            display.layout,
-                            display.orientation,
-                            display.screenGap,
+            drawDisplayPage(display,
                             lidClosed,
-                            display.noSync,
                             contentFocus,
                             contentFocused,
                             offsetX,

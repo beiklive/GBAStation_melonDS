@@ -1,0 +1,22 @@
+file(GLOB retired_shaders "${NDS_STUB_SHADER_DIR}/fulldex_*.dksh")
+if(retired_shaders)
+    file(REMOVE ${retired_shaders})
+endif()
+# Shared by the standalone and embedded GBAStation NRO targets.
+foreach(stage IN ITEMS wide_vsh wide_fsh final_vsh final_fsh)
+    if(stage MATCHES "vsh$")
+        set(shader_type vert)
+    else()
+        set(shader_type frag)
+    endif()
+    nds_stub_compile_shader(${shader_type} "${CMAKE_SOURCE_DIR}/src/fulldex/${stage}" "nds3d_${stage}")
+endforeach()
+
+# Enable early depth/stencil only on draws guaranteed not to discard fragments.
+set(fragment_source "${CMAKE_SOURCE_DIR}/src/fulldex/wide_fsh.glsl")
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${fragment_source}")
+file(READ "${fragment_source}" fragment)
+string(REPLACE "#version 460" "#version 460\n#define WIDE_EARLY 1" fragment "${fragment}")
+set(early_shader "${NDS_STUB_GENERATED_SHADER_DIR}/nds3d_early")
+file(WRITE "${early_shader}.glsl" "${fragment}")
+nds_stub_compile_shader(frag "${early_shader}" nds3d_early)

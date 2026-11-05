@@ -34,6 +34,7 @@ public:
 
     void init(GPU2D::DekoRenderer* renderer);
     void deinit();
+    void refreshFramebufferTextures();
 
     RectF topRect() const;
     RectF bottomRect() const;

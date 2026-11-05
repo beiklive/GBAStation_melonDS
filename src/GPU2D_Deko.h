@@ -40,18 +40,20 @@ public:
     int GetRenderScale() const { return RenderScale; }
     int GetFramebufferWidth() const { return 256 * RenderScale; }
     int GetFramebufferHeight() const { return 192 * RenderScale; }
-    int GetFramebufferTextureWidth() const { return MaxFramebufferWidth; }
-    int GetFramebufferTextureHeight() const { return MaxFramebufferHeight; }
+    int GetFramebufferTextureWidth() const { return GetFramebufferWidth(); }
+    int GetFramebufferTextureHeight() const { return GetFramebufferHeight(); }
     void RequestFramebufferCapture();
+    bool PresentEnhanced = false;
+    dk::Image EnhancedImage;
     bool TakeCapturedFramebufferRGBA(std::vector<u8>& outTop, std::vector<u8>& outBottom);
     bool ReadFramebufferRGBA(std::vector<u8>& outTop, std::vector<u8>& outBottom);
 
     dk::Fence FramebufferReady[2] = {};
     dk::Fence FramebufferPresented[2] = {};
 private:
-    static constexpr int MaxRenderScale = 4;
-    static constexpr int MaxFramebufferWidth = 256 * MaxRenderScale;
-    static constexpr int MaxFramebufferHeight = 192 * MaxRenderScale;
+    dk::UniqueMemBlock ScaledMemory;
+    bool EnhancedDescriptorDirty = false;
+    GpuMemHeap::Allocation EnhancedMemory;
     int RenderScale = 1;
 
     u16 DispFIFOFramebuffer[256*192];
@@ -112,6 +114,7 @@ private:
         descriptorOffset_Palettes = descriptorOffset_VRAM16+textureVRAM_Count,
         descriptorOffset_DirectBitmap = descriptorOffset_Palettes+2,
         descriptorOffset_3DFramebuffer = descriptorOffset_DirectBitmap+2,
+        descriptorOffset_Enhanced,
         descriptorOffset_DisabledBG,
         descriptorOffset_MosaicTable,
         descriptorOffset_OBJWindow,

@@ -1,5 +1,7 @@
 #include "GPU2D_Deko.h"
+#include "fulldex/Presentation.h"
 #include "GPU.h"
+#include "GPU3D.h"
 
 #include <arm_neon.h>
 #include <algorithm>
@@ -43,13 +45,13 @@ void DekoLog(const char* format, ...)
 DekoRenderer::DekoRenderer() :
     CmdMem(*Gfx::DataHeap, 1024*1024*2)
 {
-    DekoLog("GBAStationNDSStub: GPU2D_Deko ctor begin fb=%dx%d", MaxFramebufferWidth, MaxFramebufferHeight);
+    DekoLog("GBAStationNDSStub: GPU2D_Deko ctor begin fb=%dx%d", 256, 192);
     memset(FramebufferReady, 0, sizeof(dk::Fence)*2);
     memset(FramebufferPresented, 0, sizeof(dk::Fence)*2);
 
     dk::ImageLayout finalFbLayout;
     dk::ImageLayoutMaker{Gfx::Device}
-        .setDimensions(MaxFramebufferWidth, MaxFramebufferHeight)
+        .setDimensions(256, 192)
         .setFlags(DkImageFlags_UsageRender)
         .setFormat(DkImageFormat_RGBA8_Unorm)
         .initialize(finalFbLayout);
@@ -84,10 +86,12 @@ DekoRenderer::DekoRenderer() :
 
     dk::ImageLayout hires3DFbLayout;
     dk::ImageLayoutMaker{Gfx::Device}
-        .setDimensions(MaxFramebufferWidth, MaxFramebufferHeight)
+        .setDimensions(256, 192)
         .setFlags(DkImageFlags_UsageRender|DkImageFlags_UsageLoadStore|DkImageFlags_Usage2DEngine)
         .setFormat(DkImageFormat_R32_Uint)
         .initialize(hires3DFbLayout);
+    EnhancedMemory = Gfx::TextureHeap->Alloc(hires3DFbLayout.getSize(), hires3DFbLayout.getAlignment());
+    EnhancedImage.initialize(hires3DFbLayout, Gfx::TextureHeap->MemBlock, EnhancedMemory.Offset);
     _3DFramebufferMemory = Gfx::TextureHeap->Alloc(hires3DFbLayout.getSize(), hires3DFbLayout.getAlignment());
     _3DFramebuffer.initialize(hires3DFbLayout, Gfx::TextureHeap->MemBlock, _3DFramebufferMemory.Offset);
     DekoLog("GBAStationNDSStub: GPU2D_Deko 3dFb layoutSize=%llu align=%u",
@@ -205,6 +209,7 @@ DekoRenderer::DekoRenderer() :
         imageDescriptors[descriptorOffset_DirectBitmap+i].initialize(dk::ImageView{DirectBitmapTexture[i]});
         imageDescriptors[descriptorOffset_OBJWindow+i].initialize(dk::ImageView{OBJWindow[i]});
     }
+    imageDescriptors[descriptorOffset_Enhanced].initialize(dk::ImageView{EnhancedImage});
     imageDescriptors[descriptorOffset_3DFramebuffer].initialize(dk::ImageView{_3DFramebuffer});
     imageDescriptors[descriptorOffset_DisabledBG].initialize(dk::ImageView{DisabledBG});
     imageDescriptors[descriptorOffset_MosaicTable].initialize(dk::ImageView{MosaicTable});
@@ -263,11 +268,55 @@ DekoRenderer::DekoRenderer() :
 
 void DekoRenderer::SetRenderScale(int scale)
 {
-    scale = std::clamp(scale, 1, MaxRenderScale);
-    if (RenderScale == scale)
+    scale = std::clamp(scale, 1, Fulldex::MaxScale());
+    if (scale == RenderScale)
         return;
+
+    dk::ImageLayout color, layer;
+    dk::ImageLayoutMaker{Gfx::Device}.setDimensions(256 * scale, 192 * scale)
+        .setFlags(DkImageFlags_UsageRender).setFormat(DkImageFormat_RGBA8_Unorm).initialize(color);
+    dk::ImageLayoutMaker{Gfx::Device}.setDimensions(256 * scale, 192 * scale)
+        .setFlags(DkImageFlags_UsageRender|DkImageFlags_UsageLoadStore|DkImageFlags_Usage2DEngine)
+        .setFormat(DkImageFormat_R32_Uint).initialize(layer);
+    const auto align = [](u64 size, u64 alignment) { return (size + alignment - 1) & ~(alignment - 1); };
+    const u32 layerOffset = align(color.getSize() * 4, layer.getAlignment());
+    dk::UniqueMemBlock next;
+    const u32 bytes = align(layerOffset + layer.getSize(), DK_MEMBLOCK_ALIGNMENT);
+    if (scale > 1 && (!ScaledMemory || ScaledMemory.getSize() < bytes)) {
+        next = dk::MemBlockMaker{Gfx::Device, bytes}
+            .setFlags(DkMemBlockFlags_GpuCached | DkMemBlockFlags_Image).create();
+        if (!next) {
+            DekoLog("GBAStationNDSStub: cannot allocate %u bytes for %dx; retaining %dx", bytes, scale, RenderScale);
+            return;
+        }
+    }
+    // RunFrame ends after line 262 pre-renders sprites for the next frame.
+    // Submit that open list before rebinding images or rewriting descriptors.
+    if (CmdBufOpen) {
+        EmuQueue.submitCommands(CmdMem.End(EmuCmdBuf));
+        EmuQueue.flush();
+        UploadBuf.LastFlushBuffer = 0;
+        CmdBufOpen = false;
+    }
+    // The raster signals EmuQueue; the screen textures are consumed on PresentQueue.
     Gfx::EmuQueue.waitIdle();
+    Gfx::PresentQueue.waitIdle();
+    if (scale == 1 || next)
+        ScaledMemory = std::move(next);
+    const DkMemBlock block = scale == 1 ? DkMemBlock(Gfx::TextureHeap->MemBlock) : DkMemBlock(ScaledMemory);
+    const u32 base = scale == 1 ? FinalFramebufferMemory.Offset : 0;
+    for (int front = 0; front < 2; ++front)
+        for (int screen = 0; screen < 2; ++screen)
+            FinalFramebuffers[front][screen].initialize(color, block, base + color.getSize() * (2*front + screen));
+    EnhancedImage.initialize(layer, block, scale == 1 ? EnhancedMemory.Offset : layerOffset);
+    Gfx::DataHeap->CpuAddr<dk::ImageDescriptor>(ImageDescriptors)[descriptorOffset_Enhanced]
+        .initialize(dk::ImageView{EnhancedImage});
+    ++GPU3D::GeometryEpoch; // A newly allocated target has no reusable frame, even at the same scale.
+    EnhancedDescriptorDirty = true;
     RenderScale = scale;
+    PresentEnhanced = false;
+    CapturedFramebufferTop.clear();
+    CapturedFramebufferBottom.clear();
     DekoLog("GBAStationNDSStub: GPU2D_Deko render scale=%d framebuffer=%dx%d",
             RenderScale, GetFramebufferWidth(), GetFramebufferHeight());
 }
@@ -328,6 +377,10 @@ bool DekoRenderer::ReadFramebufferRGBA(std::vector<u8>& outTop, std::vector<u8>&
 
 DekoRenderer::~DekoRenderer()
 {
+    Gfx::EmuQueue.waitIdle();
+    Gfx::PresentQueue.waitIdle();
+    Gfx::TextureHeap->Free(EnhancedMemory);
+    Gfx::TextureHeap->Free(FinalFramebufferMemory);
 }
 
 template <u32 Size>
@@ -357,6 +410,10 @@ void DekoRenderer::OpenCmdBuf()
         CmdMem.Begin(EmuCmdBuf);
         DkViewport viewport = {0.f, 0.f, 256.f, 192.f, 0.f, 1.f};
         EmuCmdBuf.setViewports(0, {viewport, viewport});
+        if (EnhancedDescriptorDirty) {
+            EmuCmdBuf.barrier(DkBarrier_None, DkInvalidateFlags_Descriptors);
+            EnhancedDescriptorDirty = false;
+        }
         EmuCmdBuf.bindSamplerDescriptorSet(Gfx::DataHeap->GpuAddr(SamplerDescriptors), 1);
         EmuCmdBuf.bindImageDescriptorSet(Gfx::DataHeap->GpuAddr(ImageDescriptors), descriptorOffset_Count);
         EmuCmdBuf.bindColorWriteState(dk::ColorWriteState{});
@@ -366,6 +423,7 @@ void DekoRenderer::OpenCmdBuf()
 
 void DekoRenderer::Reset()
 {
+    PresentEnhanced = false;
     for (int i = 0; i < 2; i++)
     {
         LastDispCnt[i] = 0;
@@ -1964,6 +2022,9 @@ void DekoRenderer::FlushBGDraw(u32 curline, u32 bgmask)
 
 void DekoRenderer::ComposeBGOBJ()
 {
+    // The enhanced image may have been written on the raster queue. Its
+    // completion fence is already queued; discard stale texture cache lines.
+    if (PresentEnhanced) EmuCmdBuf.barrier(DkBarrier_None, DkInvalidateFlags_Image);
     dk::ImageView colorTarget{FinalFramebuffers[GPU::FrontBuffer^1][CurUnit->Num == UnitAIsTop]};
     bool capture = CurUnit->Num == 0 && CaptureLatch && !(CaptureCnt & (1<<24));
     static u32 composeLogCount = 0;
@@ -2039,7 +2100,7 @@ void DekoRenderer::ComposeBGOBJ()
                     bgOrder[n++] = j;
 
         ComposeUniform& composeUniform = ComposeUniforms[CurUnit->Num];
-        composeUniform.ThreeDScale = RenderScale;
+        composeUniform.ThreeDScale = 1;
         composeUniform.OutputScale = RenderScale;
         composeUniform.ThreeDLayerMask = 0;
         int textureHandleIdx[4];
@@ -2127,6 +2188,15 @@ void DekoRenderer::ComposeBGOBJ()
             EmuCmdBuf.draw(DkPrimitive_TriangleStrip, 4, 1, 0, 0);
         }
 
+        // Capture above must always sample the native 3D layer.
+        if (PresentEnhanced && composeUniform.ThreeDLayerMask) {
+            for (int i = 0; i < 4; ++i)
+                if (textureHandleIdx[i] == descriptorOffset_3DFramebuffer)
+                    EmuCmdBuf.bindTextures(DkStage_Fragment, i, {dkMakeTextureHandle(descriptorOffset_Enhanced, 0)});
+            composeUniform.ThreeDScale = RenderScale;
+            EmuCmdBuf.pushConstants(Gfx::DataHeap->GpuAddr(ComposeUniformMemory), ComposeUniformSize,
+                offsetof(ComposeUniform, ThreeDScale), sizeof(composeUniform.ThreeDScale), &composeUniform.ThreeDScale);
+        }
         EmuCmdBuf.bindRenderTargets({&colorTarget});
         composeUniform.OutputScale = RenderScale;
         EmuCmdBuf.pushConstants(Gfx::DataHeap->GpuAddr(ComposeUniformMemory), ComposeUniformSize,

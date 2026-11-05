@@ -802,8 +802,10 @@ void Init()
     ShaderCodeHeap.emplace(Device, 1024*1024*48,
         DkMemBlockFlags_CpuUncached | DkMemBlockFlags_GpuCached | DkMemBlockFlags_Code, 512);
     GfxLog("GBAStationNDSStub: Gfx ShaderCodeHeap create ok");
-    GfxLog("GBAStationNDSStub: Gfx DataHeap create begin bytes=%u", 1024U*1024U*896U);
-    DataHeap.emplace(Device, 1024*1024*896, DkMemBlockFlags_CpuUncached | DkMemBlockFlags_GpuCached, 256);
+    // Only the native DS capture uses compute tile bins. Scaled images use their own blocks.
+    constexpr u32 dataBytes = 384U * 1024 * 1024;
+    GfxLog("GBAStationNDSStub: Gfx DataHeap create begin bytes=%u", dataBytes);
+    DataHeap.emplace(Device, dataBytes, DkMemBlockFlags_CpuUncached | DkMemBlockFlags_GpuCached, 256);
     GfxLog("GBAStationNDSStub: Gfx DataHeap create ok");
 
     GfxLog("GBAStationNDSStub: Gfx command buffers create begin");

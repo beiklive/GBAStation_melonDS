@@ -144,7 +144,7 @@ layout (std430, binding = 3)
 buffer BinResultBuffer
 {
     uvec4 VariantWorkCount[MaxVariants];
-    uint SortedWorkOffset[MaxVariants];
+    uvec2 SortedWorkRange[MaxVariants]; // start and count for each rasterisation dispatch
 
     uvec4 SortWorkWorkCount;
     uvec2 UnsortedWorkDescs[MaxWorkTiles];
@@ -967,7 +967,9 @@ void main()
         uint workOffset = atomicAdd(VariantWorkCount[0].w, uint(bitCount(binnedMask)));
         WorkOffsets[linearTile * BinStride + groupIdx] = workOffset;
 
-        uint tilePositionCombined = bitfieldInsert(fineTileTopLeft.x, fineTileTopLeft.y, 16, 16);
+        // Tile origins are multiples of eight. Two 10-bit tile coordinates
+        // and an 11-bit polygon ID leave a full word for the work index.
+        uint tilePosition = uint(fineTileTopLeft.x / TileSize) | (uint(fineTileTopLeft.y / TileSize) << 10);
 
         int idx = 0;
         while (binnedMask != 0U)
@@ -979,7 +981,7 @@ void main()
             int variantIdx = Polygons[polygonIdx].Variant;
 
             int inVariantOffset = int(atomicAdd(VariantWorkCount[variantIdx].z, 1));
-            UnsortedWorkDescs[workOffset + idx] = uvec2(tilePositionCombined, bitfieldInsert(inVariantOffset, polygonIdx, 16, 16));
+            UnsortedWorkDescs[workOffset + idx] = uvec2(tilePosition | (uint(polygonIdx) << 20), uint(inVariantOffset));
 
             idx++;
         }
@@ -1001,7 +1003,12 @@ void main()
             // a bit of a cheat putting this here, but this shader won't run that often
             SortWorkWorkCount = uvec4((VariantWorkCount[0].w + 31) / 32, 1, 1, 0);
         }
-        SortedWorkOffset[gl_GlobalInvocationID.x] = atomicAdd(VariantWorkCount[1].w, VariantWorkCount[gl_GlobalInvocationID.x].z);
+        uint variant = gl_GlobalInvocationID.x;
+        uint count = VariantWorkCount[variant].z;
+        SortedWorkRange[variant] = uvec2(atomicAdd(VariantWorkCount[1].w, count), count);
+        // Keep each dispatch dimension within 65535 even at 4x.
+        VariantWorkCount[variant].x = (count + 1023U) / 1024U;
+        VariantWorkCount[variant].z = min(count, 1024U);
     }
 }
 
@@ -1016,12 +1023,12 @@ void main()
     if (gl_GlobalInvocationID.x < VariantWorkCount[0].w)
     {
         uvec2 workDesc = UnsortedWorkDescs[gl_GlobalInvocationID.x];
-        int inVariantOffset = int(bitfieldExtract(workDesc.y, 0, 16));
-        int polygonIdx = int(bitfieldExtract(workDesc.y, 16, 16));
+        uint inVariantOffset = workDesc.y;
+        uint polygonIdx = workDesc.x >> 20;
         int variantIdx = Polygons[polygonIdx].Variant;
 
-        int sortedIndex = int(SortedWorkOffset[variantIdx]) + inVariantOffset;
-        SortedWork[sortedIndex] = uvec2(workDesc.x, bitfieldInsert(workDesc.y, gl_GlobalInvocationID.x, 0, 16));
+        uint sortedIndex = SortedWorkRange[variantIdx].x + inVariantOffset;
+        SortedWork[sortedIndex] = uvec2(workDesc.x, gl_GlobalInvocationID.x);
     }
 }
 
@@ -1035,10 +1042,13 @@ layout (binding = 0) uniform usampler2DArray CurrentTexture;
 
 void main()
 {
-    uvec2 workDesc = SortedWork[SortedWorkOffset[CurVariant] + gl_WorkGroupID.z];
-    Polygon polygon = Polygons[bitfieldExtract(workDesc.y, 16, 16)];
-    ivec2 position = ivec2(bitfieldExtract(workDesc.x, 0, 16), bitfieldExtract(workDesc.x, 16, 16)) + ivec2(gl_LocalInvocationID.xy);
-    int tileOffset = int(bitfieldExtract(workDesc.y, 0, 16)) * TileSize * TileSize + TileSize * int(gl_LocalInvocationID.y) + int(gl_LocalInvocationID.x);
+    uint work = gl_WorkGroupID.x * 1024U + gl_WorkGroupID.z;
+    uvec2 range = SortedWorkRange[CurVariant];
+    if (work >= range.y) return;
+    uvec2 workDesc = SortedWork[range.x + work];
+    Polygon polygon = Polygons[workDesc.x >> 20];
+    ivec2 position = ivec2(bitfieldExtract(workDesc.x, 0, 10), bitfieldExtract(workDesc.x, 10, 10)) * TileSize + ivec2(gl_LocalInvocationID.xy);
+    int tileOffset = int(workDesc.y) * TileSize * TileSize + TileSize * int(gl_LocalInvocationID.y) + int(gl_LocalInvocationID.x);
 
     uint color = 0U;
     if (position.y >= polygon.YTop && position.y < polygon.YBot)
