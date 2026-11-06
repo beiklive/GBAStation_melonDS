@@ -1,8 +1,8 @@
 #include <switch.h>
 #include <stdio.h>
+#include <inttypes.h>
 
 extern char __start__;
-extern char __rodata_start;
 
 void HandleFault(u64 pc, u64 lr, u64 fp, u64 faultAddr, u32 desc)
 {
@@ -10,29 +10,11 @@ void HandleFault(u64 pc, u64 lr, u64 fp, u64 faultAddr, u32 desc)
     if (!log) log = fopen("melonds_gl.log", "ab");
     if (log)
     {
-        fprintf(log, "FAULT pc=%p lr=%p fp=%p addr=%p desc=%u\n",
-            (void*)pc, (void*)lr, (void*)fp, (void*)faultAddr, desc);
+        // The frame pointer may be corrupt. Save the registers and load base
+        // without dereferencing the faulting thread's stack.
+        fprintf(log, "FAULT pc=%#" PRIx64 " lr=%#" PRIx64 " fp=%#" PRIx64
+                " addr=%#" PRIx64 " desc=%u base=%p\n",
+                pc, lr, fp, faultAddr, desc, (void*)&__start__);
         fclose(log);
-    }
-    if (pc >= (u64)&__start__ && pc < (u64)&__rodata_start)
-    {
-        printf("unintentional fault in .text at %p (type %d) (trying to access %p?)\n", 
-            pc - (u64)&__start__, desc, faultAddr);
-        
-        int frameNum = 0;
-        while (true)
-        {
-            printf("stack frame %d %p\n", frameNum, lr - (u64)&__start__);
-            lr = *(u64*)(fp + 8);
-            fp = *(u64*)fp;
-
-            frameNum++;
-            if (frameNum > 16 || fp == 0 || (fp & 0x7) != 0)
-                break;
-        }
-    }
-    else
-    {
-        printf("unintentional fault somewhere in deep (address) space at %p (type %d)\n", pc, desc);
     }
 }

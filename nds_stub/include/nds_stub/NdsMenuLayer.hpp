@@ -62,7 +62,7 @@ struct NdsStateSlotInfo {
 
 // Focus order is shared by input, scrolling and drawing.
 enum NdsDisplayRow {
-    RowFastForward, RowFilter, RowResolution,
+    RowFastForward, RowNormalSpeedAudio, RowFilter, RowResolution,
     RowIntegerScale, RowLayout, RowCustomLayout, RowOrientation, RowScreenGap,
     RowOverlay, RowShader, RowLid, RowNoSync, RowSyncDisplay, RowSyncOverlay, RowSyncShader,
     DisplayRowCount
@@ -70,6 +70,7 @@ enum NdsDisplayRow {
 
 struct NdsDisplaySettings {
     float fastForwardMultiplier = 1.0f;
+    bool normalSpeedAudio = false;
     bool linearFiltering = false;
     int renderScale = 1;
     bool integerScale = true;
@@ -104,6 +105,7 @@ struct NdsCheatItem {
     std::string name;
     int parent = -1;
     int depth = 0;
+    int versionGroup = -1;
     bool expanded = false;
     bool enabled = false;
     std::vector<std::uint32_t> words;

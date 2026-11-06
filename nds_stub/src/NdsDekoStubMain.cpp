@@ -21,8 +21,13 @@ namespace beiklive::nds_stub {
 namespace {
 
 constexpr const char* kStubLogPaths[] = {
+#ifdef GBAS_CORE11
+    "sdmc:/GBAStation/log/NdsCore11.log",
+    "/GBAStation/log/NdsCore11.log",
+#else
     "sdmc:/GBAStation/log/NdsDekoStub.log",
     "/GBAStation/log/NdsDekoStub.log",
+#endif
 };
 
 std::mutex g_stubLogMutex;
@@ -212,8 +217,31 @@ int main(int argc, char* argv[])
 {
     beiklive::nds_stub::initializeStubLog();
     beiklive::nds_stub::appendStubLog("GBAStationNDSStub: main entered");
+#ifdef GBAS_CORE11
+    const auto appletType=appletGetAppletType();
+    if(appletType!=AppletType_Application && appletType!=AppletType_SystemApplication) {
+        beiklive::nds_stub::appendStubLog("Core11 requires full application memory, applet type=%d", int(appletType));
+        consoleInit(nullptr);
+        printf("GBAStation NDS 1.1 needs application mode.\nHold R while launching a game to open hbmenu.\nPress + to exit.\n");
+        padConfigureInput(1,HidNpadStyleSet_NpadStandard);
+        PadState pad; padInitializeDefault(&pad);
+        while(appletMainLoop()) {
+            padUpdate(&pad);
+            if(padGetButtonsDown(&pad)&HidNpadButton_Plus) break;
+            consoleUpdate(nullptr);
+        }
+        consoleExit(nullptr);
+        return 1;
+    }
+#endif
     beiklive::nds_stub::appendStubLog("GBAStationNDSStub: svcSetThreadCoreMask begin");
+#ifdef GBAS_CORE11
+    // The donor native 3D worker owns core 1. Keep emulation on core 0.
+    const Result affinityResult=svcSetThreadCoreMask(CUR_THREAD_HANDLE, 0, 1ULL << 0);
+    beiklive::nds_stub::appendStubLog("Core11: emulation core=0 affinity result=0x%X",affinityResult);
+#else
     svcSetThreadCoreMask(CUR_THREAD_HANDLE, 1, 1ULL << 1);
+#endif
     beiklive::nds_stub::appendStubLog("GBAStationNDSStub: svcSetThreadCoreMask ok");
     beiklive::nds_stub::appendStubLog("GBAStationNDSStub: Deko-only start argc=%d", argc);
     for (int i = 0; i < argc; ++i)
@@ -248,8 +276,19 @@ int main(int argc, char* argv[])
         }
     }
 
+#ifdef GBAS_CORE11
+    // When launched from hbmenu, the case under investigation uses the paths
+    // observed in the runtime log. GBAStation can still pass any ROM normally.
+    const bool blackShortcut=!romPath[0];
+#endif
     beiklive::nds_stub::DekoRunOptions options;
     options.romPath = romPath ? romPath : "";
+#ifdef GBAS_CORE11
+    if(options.romPath.empty()) {
+        options.romPath="sdmc:/roms/nds/black.nds";
+        exitToHome=true;
+    }
+#endif
     options.returnNroPath = returnNro && returnNro[0] ? returnNro : "sdmc:/switch/GBAStation.nro";
     options.returnToNroOnExit = !exitToHome;
     options.title = titleFromPath(options.romPath);
@@ -313,5 +352,8 @@ int main(int argc, char* argv[])
         }
     }
 
+#ifdef GBAS_CORE11
+    if(blackShortcut && options.savePath.empty()) options.savePath="sdmc:/GBAStation/saves/NDS/black";
+#endif
     return beiklive::nds_stub::RunDekoRuntime(options);
 }

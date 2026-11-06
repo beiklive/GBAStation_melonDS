@@ -364,31 +364,48 @@ NdsCheatLoadResult LoadUsrCheatDatForRom(const std::string& romPath)
 
     std::vector<const DatEntryInfo*> candidates;
     for (const auto& match : matches)
-    {
         if (match.checksum == checksum)
-        {
             candidates.push_back(&match);
-            break;
-        }
-    }
-    for (const auto& match : matches)
-    {
-        if (match.checksum != checksum)
+    result.checksumMatched = !candidates.empty();
+    if (candidates.empty())
+        for (const auto& match : matches)
             candidates.push_back(&match);
-    }
 
-    const DatEntryInfo* selected = candidates.empty() ? &matches.front() : candidates.front();
+    // Header CRCs may be absent (patched ROMs) or duplicated (different hacks).
+    // Keep those versions separate rather than silently installing the first.
+    const bool chooseVersion = candidates.size() > 1 || !result.checksumMatched;
+    const DatEntryInfo* selected = candidates.front();
     for (const DatEntryInfo* candidate : candidates)
     {
         NdsCheatLoadResult parsed;
         if (parseCheatsAtOffset(file, fileSize, *candidate, parsed))
         {
-            selected = candidate;
-            result.gameName = std::move(parsed.gameName);
-            result.items = std::move(parsed.items);
-            result.skippedInvalidCodes = parsed.skippedInvalidCodes;
+            if (result.gameName.empty()) {
+                selected = candidate;
+                result.gameName = parsed.gameName;
+            }
+            result.skippedInvalidCodes += parsed.skippedInvalidCodes;
             result.gameMatched = true;
-            break;
+            ++result.versionCount;
+            if (!chooseVersion) {
+                result.items = std::move(parsed.items);
+                break;
+            }
+            const int group = static_cast<int>(result.items.size());
+            NdsCheatItem folder;
+            folder.type = NdsCheatItem::Type::Category;
+            folder.name = parsed.gameName;
+            folder.versionGroup = group;
+            result.items.push_back(std::move(folder));
+            const int firstChild = group + 1;
+            for (auto& item : parsed.items) {
+                item.parent = item.parent < 0 ? group : firstChild + item.parent;
+                ++item.depth;
+                item.versionGroup = group;
+                item.enabled = false;
+                result.items.push_back(std::move(item));
+            }
+            continue;
         }
 
         appendStubLog("GBAStationNDSStub: usrcheat parse failed offset=%08X checksum=%08X partialItems=%d game=%s",
@@ -397,6 +414,9 @@ NdsCheatLoadResult LoadUsrCheatDatForRom(const std::string& romPath)
                       static_cast<int>(parsed.items.size()),
                       parsed.gameName.c_str());
     }
+    if (chooseVersion)
+        appendStubLog("GBAStationNDSStub: usrcheat version selection required gameCode=%08X checksum=%08X exact=%d versions=%d (no codes auto-enabled)",
+                      gameCode, checksum, result.checksumMatched, result.versionCount);
     if (!result.gameMatched)
         result.items.clear();
 

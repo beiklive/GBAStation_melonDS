@@ -7,6 +7,8 @@
 #include "nds_stub/NdsLanguage.hpp"
 #include "nds_stub/NdsShaderCatalog.hpp"
 #include "nds_stub/NdsUiAudio.hpp"
+#include "nds_stub/PcmBlock.hpp"
+#include "nds_stub/PcmQueue.hpp"
 #include "nds_stub/ui/UiComponents.hpp"
 
 #include <algorithm>
@@ -40,6 +42,12 @@
 #undef OGLRENDERER_ENABLED
 #endif
 
+#ifdef GBAS_CORE11
+#include "FrontendAPI.h"
+#include "SaveSeed.h"
+#define SAVESTATE_MAJOR 13
+#define SAVESTATE_MINOR 0
+#else
 #include "Config.h"
 #include "ARCodeFile.h"
 #include "AREngine.h"
@@ -50,6 +58,7 @@
 #include "Platform.h"
 #include "Savestate.h"
 #include "SPU.h"
+#endif
 #include "frontend/mic_blow.h"
 #include "frontend/switch/PlatformConfig.h"
 #include "frontend/switch/Gfx.h"
@@ -934,6 +943,7 @@ int syncNdsShaderSettingsToGameDb(const std::string& romPath,
     return -1;
 }
 
+#ifndef GBAS_CORE11
 std::unique_ptr<ARCodeFile> buildRuntimeCheatFile(const std::vector<beiklive::nds_stub::NdsCheatItem>& items,
                                                   int& enabledCount,
                                                   int& truncatedCount)
@@ -980,7 +990,7 @@ std::unique_ptr<ARCodeFile> buildRuntimeCheatFile(const std::vector<beiklive::nd
         file->Categories.push_back(cat);
     return file;
 }
-
+#endif
 std::string formatFileTime(const std::string& path)
 {
     std::error_code ec;
@@ -1522,13 +1532,16 @@ bool saveStateFile(const std::string& path)
     ec.clear();
 
     bool ok = false;
+#ifdef GBAS_CORE11
+    ok = Core11::SaveState(tempPath);
+#else
     {
         Savestate state(tempPath.c_str(), true);
         if (state.Error)
             return false;
         ok = NDS::DoSavestate(&state) && !state.Error;
     }
-
+#endif
     if (!ok || !isSavestateHeaderValid(tempPath))
     {
         std::filesystem::remove(tempPath, ec);
@@ -1552,10 +1565,14 @@ bool loadStateFile(const std::string& path)
 {
     if (!isSavestateHeaderValid(path))
         return false;
+#ifdef GBAS_CORE11
+    return Core11::LoadState(path);
+#else
     Savestate state(path.c_str(), false);
     if (state.Error)
         return false;
     return NDS::DoSavestate(&state) && !state.Error;
+#endif
 }
 
 bool fileExists(const char* path)
@@ -2061,6 +2078,7 @@ bool setReturnNro(const std::string& returnNro)
     return R_SUCCEEDED(rc);
 }
 
+#ifndef GBAS_CORE11
 void configureArcDelta(const NdsInputConfig& config)
 {
     auto copyPath = [](char* target, size_t size, const std::string& value) {
@@ -2093,7 +2111,7 @@ void configureArcDelta(const NdsInputConfig& config)
     Config::DirectBoot = config.intValue("core.melonds_direct_boot", 1) != 0;
     Config::FirmwareBootMenu = Config::DirectBoot ? 0 : 1;
 }
-
+#endif
 class DekoAudioOutput {
 public:
     bool start()
@@ -2183,6 +2201,7 @@ public:
         // Wait until any in-flight SPU::ReadOutput() call has left the melonDS
         // audio buffer before NDS::LoadROM()/NDS::Reset() reinitializes SPU.
         std::lock_guard<std::mutex> lock(m_spuReadMutex);
+        m_pcm.clear();
     }
 
     void resumeAfterCoreReset()
@@ -2196,19 +2215,24 @@ public:
         return fn();
     }
 
-    void setFastForwardActive(bool enabled, float multiplier)
+    void setFastForwardActive(bool enabled, float multiplier, bool normalSpeed = false)
     {
-        const int pitchPermille = enabled
+        const bool keepNormal = enabled && normalSpeed;
+        const int pitchPermille = enabled && !keepNormal
             ? std::clamp(static_cast<int>(std::lround(multiplier * 1000.0f)), 100, 5000)
             : 1000;
         m_fastForwardPitchPermille.store(pitchPermille, std::memory_order_release);
 
-        if (m_fastForwardAudio.exchange(enabled, std::memory_order_acq_rel) == enabled)
+        const bool oldFast = m_fastForwardAudio.exchange(enabled, std::memory_order_acq_rel);
+        const bool oldNormal = m_normalSpeedAudio.exchange(keepNormal, std::memory_order_acq_rel);
+        if (oldFast == enabled && oldNormal == keepNormal)
             return;
 
         // Do not play samples queued for the previous rate at the new pitch.
         // Keeping them is especially noticeable when returning from 4x/5x.
         std::lock_guard<std::mutex> lock(m_spuReadMutex);
+        m_pcm.setNormalSpeed(keepNormal);
+        m_pcm.clear();
         SPU::DrainOutput();
     }
 
@@ -2218,13 +2242,40 @@ public:
             return;
 
         std::lock_guard<std::mutex> lock(m_spuReadMutex);
+        m_pcm.clear();
         SPU::DrainOutput();
+    }
+
+    void captureFrameAudio()
+    {
+        std::lock_guard<std::mutex> lock(m_spuReadMutex);
+        if (m_paused.load() || m_muted.load()) { SPU::DrainOutput(); m_pcm.clear(); return; }
+        std::array<int16_t, 1024 * 2> block;
+        // Drain after each emulated frame so fast-forward cannot overrun the
+        // core's small SPU ring before the device consumes its next buffer.
+        for (;;) {
+            const int n = SPU::ReadOutput(block.data(), 1024);
+            if (n <= 0) break;
+            m_pcm.push(block.data(), n);
+        }
     }
 
     void push(const int16_t* samples, size_t stereoFrames)
     {
         (void)samples;
         (void)stereoFrames;
+    }
+
+    void logStats()
+    {
+        beiklive::nds_stub::appendStubLog(
+            "[audio] sourceHz=%d pitch=%.3f normalSpeed=%d submitted=%llu shortBlocks=%llu emptyReads=%llu rejected=%llu",
+            kInputSampleRate, m_driverPitchPermille.load(std::memory_order_relaxed) / 1000.0,
+            m_normalSpeedAudio.load(std::memory_order_relaxed) ? 1 : 0,
+            static_cast<unsigned long long>(m_submittedFrames.exchange(0)),
+            static_cast<unsigned long long>(m_shortBlocks.exchange(0)),
+            static_cast<unsigned long long>(m_emptyReads.exchange(0)),
+            static_cast<unsigned long long>(m_rejectedBlocks.exchange(0)));
     }
 
 private:
@@ -2242,6 +2293,13 @@ private:
 
     void threadMain()
     {
+#ifdef GBAS_CORE11
+        // Emulation now owns core 0. The audio service must run while that
+        // thread emulates a fast-forward batch, rather than waiting behind it.
+        const auto affinity = svcSetThreadCoreMask(CUR_THREAD_HANDLE, 2, 1ULL << 2);
+        const auto priority = svcSetThreadPriority(CUR_THREAD_HANDLE, 0x2C);
+        beiklive::nds_stub::appendStubLog("[audio] core=2 affinity=0x%X priority=0x%X", affinity, priority);
+#endif
         std::array<AudioDriverWaveBuf, kBufferCount> buffers {};
         for (size_t i = 0; i < kBufferCount; ++i)
         {
@@ -2275,26 +2333,25 @@ private:
             {
                 audrvVoiceSetPitch(&m_driver, 0, static_cast<float>(pitchPermille) / 1000.0f);
                 driverPitchPermille = pitchPermille;
+                m_driverPitchPermille.store(pitchPermille, std::memory_order_relaxed);
             }
             if (muted)
             {
                 std::lock_guard<std::mutex> lock(m_spuReadMutex);
-                SPU::DrainOutput();
+                if (!m_paused.load(std::memory_order_acquire))
+                    m_pcm.clear();
             }
 
-            AudioDriverWaveBuf* refill = nullptr;
+            // A high-pitch buffer may finish in less than one audren tick.
+            // Refill every available slot on each tick, not just one of four.
             for (auto& buffer : buffers)
             {
-                if (buffer.state == AudioDriverWaveBufState_Free ||
-                    buffer.state == AudioDriverWaveBufState_Done)
-                {
-                    refill = &buffer;
+                if (m_paused.load(std::memory_order_acquire))
                     break;
-                }
-            }
-
-            if (refill)
-            {
+                if (buffer.state != AudioDriverWaveBufState_Free &&
+                    buffer.state != AudioDriverWaveBufState_Done)
+                    continue;
+                auto* refill = &buffer;
                 auto* data = refill->data_pcm16 + refill->start_sample_offset * 2;
 
                 int frames = static_cast<int>(kBufferFrames);
@@ -2304,35 +2361,31 @@ private:
                 }
                 else
                 {
-                    frames = 0;
-                    while (m_running.load(std::memory_order_acquire) &&
-                           !m_paused.load(std::memory_order_acquire) &&
-                           !m_muted.load(std::memory_order_acquire))
                     {
-                        {
-                            std::lock_guard<std::mutex> lock(m_spuReadMutex);
-                            frames = SPU::ReadOutput(data, static_cast<int>(kBufferFrames));
-                        }
-                        if (frames > 0)
+                        std::lock_guard<std::mutex> lock(m_spuReadMutex);
+                        if (m_paused.load(std::memory_order_acquire))
                             break;
-                        svcSleepThread(10000);
+                        frames = beiklive::nds_stub::readStereoPcmBlock(data, static_cast<int>(kBufferFrames),
+                            [this](int16_t* dst, int count) { return m_pcm.read(dst, count); });
                     }
-
                     if (frames <= 0)
                     {
-                        audrvUpdate(&m_driver);
-                        audrenWaitFrame();
-                        continue;
+                        ++m_emptyReads;
+                        break;
                     }
-
-                    const u32 lastStereo = reinterpret_cast<u32*>(data)[frames - 1];
-                    while (frames < static_cast<int>(kBufferFrames))
-                        reinterpret_cast<u32*>(data)[frames++] = lastStereo;
+                    if (frames < static_cast<int>(kBufferFrames))
+                        ++m_shortBlocks;
                 }
 
                 armDCacheFlush(data, frames * 2 * sizeof(int16_t));
                 refill->end_sample_offset = refill->start_sample_offset + frames;
-                audrvVoiceAddWaveBuf(&m_driver, 0, refill);
+                if (!audrvVoiceAddWaveBuf(&m_driver, 0, refill))
+                {
+                    ++m_rejectedBlocks;
+                    break;
+                }
+                if (!muted)
+                    m_submittedFrames += frames;
                 audrvVoiceStart(&m_driver, 0);
             }
 
@@ -2344,8 +2397,12 @@ private:
     std::atomic<bool> m_running{false};
     std::atomic<bool> m_paused{false};
     std::atomic<bool> m_fastForwardAudio{false};
+    std::atomic<bool> m_normalSpeedAudio{false};
+    beiklive::nds_stub::PcmQueue m_pcm;
     std::atomic<bool> m_muted{false};
     std::atomic<int> m_fastForwardPitchPermille{1000};
+    std::atomic<int> m_driverPitchPermille{1000};
+    std::atomic<std::uint64_t> m_submittedFrames{0}, m_shortBlocks{0}, m_emptyReads{0}, m_rejectedBlocks{0};
     std::mutex m_spuReadMutex;
     std::thread m_thread;
     AudioDriver m_driver {};
@@ -2355,6 +2412,7 @@ private:
 
 } // namespace
 
+#ifndef GBAS_CORE11
 namespace Platform {
 
 void Init(int, char**) {}
@@ -2521,7 +2579,7 @@ int LAN_SendPacket(u8*, int) { return 0; }
 int LAN_RecvPacket(u8*) { return 0; }
 
 } // namespace Platform
-
+#endif
 namespace beiklive::nds_stub {
 
 bool ShouldUseDekoRuntime()
@@ -2562,8 +2620,37 @@ int RunDekoRuntime(const DekoRunOptions& options)
         return 1;
     }
 
-    const std::string savePath = resolveSavePath(options);
-    const std::string stateDir = resolveStateDir(options, inputConfig);
+    std::string savePath = resolveSavePath(options);
+#ifdef GBAS_CORE11
+    // Seed this core from the battery save once. Do not write v13 states or
+    // new cartridge progress into the legacy core's directory.
+    const auto oldSave=std::filesystem::path(savePath);
+    auto modernDir=oldSave.parent_path()/"core11";
+    std::error_code copyError;
+    std::filesystem::create_directories(modernDir,copyError);
+    if(copyError) {
+        appendStubLog("Core11: mkdir failed path=%s: %s",modernDir.c_str(),copyError.message().c_str());
+        return 1;
+    }
+    auto newSave=modernDir/oldSave.filename();
+    appendStubLog("GBAStation NDS 1.1: battery source=%s target=%s", oldSave.c_str(), newSave.c_str());
+    std::string seedError;
+    const auto seeded=Core11::SeedBatterySave(oldSave,newSave,seedError);
+    if(seeded==Core11::SeedResult::Error) {
+        appendStubLog("Cannot initialize battery save: %s",seedError.c_str());
+        return 1;
+    }
+    if(seeded==Core11::SeedResult::Copied)
+        appendStubLog("Core11: initialized private battery save from %s",oldSave.c_str());
+    if(seeded==Core11::SeedResult::Missing)
+        appendStubLog("Core11: no battery save found; starting from the title screen");
+    savePath=newSave.string();
+#endif
+    std::string stateDir = resolveStateDir(options, inputConfig);
+#ifdef GBAS_CORE11
+    stateDir=joinPath(stateDir,"core11");
+    {std::error_code ec; std::filesystem::create_directories(stateDir,ec); if(ec) return 1;}
+#endif
 
     padConfigureInput(1, HidNpadStyleSet_NpadStandard);
     hidInitializeTouchScreen();
@@ -2578,7 +2665,24 @@ int RunDekoRuntime(const DekoRunOptions& options)
     }
 
     auto checkpointBegin = std::chrono::steady_clock::now();
+#ifdef GBAS_CORE11
+    Core11::Settings coreSettings;
+    coreSettings.bios9=bios9Path; coreSettings.bios7=bios7Path; coreSettings.firmware=firmwarePath;
+    if(inputConfig.intValue("core.melonds_dldi_enabled",0))
+        coreSettings.dldiImage=inputConfig.value("core.melonds_dldi_path","");
+    coreSettings.jit=inputConfig.intValue("core.melonds_jit_enabled",1)!=0;
+    padUpdate(&pad);
+    if(padGetButtons(&pad) & HidNpadButton_ZL) coreSettings.jit=false;
+    coreSettings.branch=inputConfig.intValue("core.melonds_jit_branch",1)!=0;
+    coreSettings.literal=inputConfig.intValue("core.melonds_jit_literal",1)!=0;
+    coreSettings.fastmem=inputConfig.intValue("core.melonds_jit_fast_memory",1)!=0;
+    coreSettings.blockSize=std::clamp(inputConfig.intValue("core.melonds_jit_block_size",32),1,32);
+    coreSettings.directBoot=inputConfig.intValue("core.melonds_direct_boot",1)!=0;
+    coreSettings.language=std::clamp(inputConfig.intValue("core.melonds_firmware_language",-1),-1,6);
+    appendStubLog("GBAStation NDS 1.1: jit=%d, state format=13",coreSettings.jit);
+#else
     configureArcDelta(inputConfig);
+#endif
     appendStubLog("GBAStationNDSStub: Deko checkpoint config done ms=%lld", elapsedMs(checkpointBegin));
 
     appendStubLog("GBAStationNDSStub: Deko checkpoint Gfx::Init begin");
@@ -2586,6 +2690,13 @@ int RunDekoRuntime(const DekoRunOptions& options)
     Gfx::Init();
     appendStubLog("GBAStationNDSStub: Deko checkpoint Gfx::Init ok ms=%lld", elapsedMs(checkpointBegin));
 
+#ifdef GBAS_CORE11
+    const int startupScale=std::clamp(inputConfig.intValue("core.melonds_render_scale",1),1,Fulldex::MaxScale());
+    auto video=std::make_unique<GPU2D::DekoRenderer>();
+    auto* deko2d=video.get();
+    if (!deko2d->Ready()) { video.reset(); Gfx::DeInit(); romfsExit(); return 1; }
+    deko2d->SetRenderScale(startupScale);
+#else
     appendStubLog("GBAStationNDSStub: Deko checkpoint NDS::Init begin");
     checkpointBegin = std::chrono::steady_clock::now();
     NDS::Init();
@@ -2602,13 +2713,16 @@ int RunDekoRuntime(const DekoRunOptions& options)
     checkpointBegin = std::chrono::steady_clock::now();
     GPU::SetRenderSettings(0, settings);
     appendStubLog("GBAStationNDSStub: Deko checkpoint GPU::SetRenderSettings ok ms=%lld", elapsedMs(checkpointBegin));
-
+#endif
     appendStubLog("GBAStationNDSStub: Deko checkpoint Gfx::InitNdsExtensions begin");
     checkpointBegin = std::chrono::steady_clock::now();
     Gfx::InitNdsExtensions();
     appendStubLog("GBAStationNDSStub: Deko checkpoint Gfx::InitNdsExtensions ok ms=%lld", elapsedMs(checkpointBegin));
 
+#ifndef GBAS_CORE11
     auto* deko2d = static_cast<GPU2D::DekoRenderer*>(GPU::GPU2D_Renderer.get());
+    const int startupScale=settings.GL_ScaleFactor;
+#endif
     NdsGameLayer gameLayer;
     appendStubLog("GBAStationNDSStub: Deko checkpoint gameLayer.init begin renderer=%p", deko2d);
     checkpointBegin = std::chrono::steady_clock::now();
@@ -2619,6 +2733,10 @@ int RunDekoRuntime(const DekoRunOptions& options)
 
     appendStubLog("GBAStationNDSStub: Deko checkpoint LoadROM begin");
     checkpointBegin = std::chrono::steady_clock::now();
+#ifdef GBAS_CORE11
+    bool loaded=Core11::Load(coreSettings,options.romPath,savePath);
+    appendStubLog("GBAStation NDS 1.1: loaded=%d scale=%d save=%s",loaded,startupScale,savePath.c_str());
+#else
     const bool directBoot = Config::DirectBoot != 0;
     bool loaded = NDS::LoadROM(options.romPath.c_str(), savePath.c_str(), directBoot);
     appendStubLog("GBAStationNDSStub: Deko LoadROM loaded=%d directBoot=%d language=%d ms=%lld save=%s",
@@ -2627,6 +2745,7 @@ int RunDekoRuntime(const DekoRunOptions& options)
                   Config::FirmwareLanguage,
                   elapsedMs(checkpointBegin),
                   savePath.c_str());
+#endif
     if (loaded)
         playStats = loadAndIncrementNdsPlayCount(options.romPath);
 
@@ -2645,6 +2764,7 @@ int RunDekoRuntime(const DekoRunOptions& options)
     NdsUiAudioPlayer uiAudio;
     NdsDisplaySettings initialDisplay {};
     initialDisplay.fastForwardMultiplier = inputConfig.fastForwardMultiplier();
+    initialDisplay.normalSpeedAudio = inputConfig.intValue("fastforward.normal_speed_audio", 0) != 0;
     initialDisplay.linearFiltering = inputConfig.value("display.filter", "nearest") == "linear";
     initialDisplay.renderScale = deko2d->GetRenderScale();
     initialDisplay.integerScale = options.integerScale;
@@ -2669,7 +2789,7 @@ int RunDekoRuntime(const DekoRunOptions& options)
     gameLayer.setShaderType(initialDisplay.ndsShaderType);
     gameLayer.setShaderParams(ndsShaderParamUniforms(initialDisplay.ndsShaderType, initialDisplay.shaderParams));
     int requestedRenderScale = initialDisplay.renderScale;
-    if (requestedRenderScale != settings.GL_ScaleFactor) {
+    if (requestedRenderScale != startupScale) {
         menuLayer.showToast(NDS_L("显存不足，已保留原倍率"));
         if (!inputConfig.saveValue("core.melonds_render_scale", "i", std::to_string(requestedRenderScale)))
             appendStubLog("GBAStationNDSStub: could not persist startup fallback scale=%d", requestedRenderScale);
@@ -2795,8 +2915,22 @@ int RunDekoRuntime(const DekoRunOptions& options)
                   cheatLoad.skippedInvalidCodes,
                   elapsedMs(checkpointBegin));
     menuLayer.setCheatItems(cheatLoad.items);
-    std::unique_ptr<ARCodeFile> runtimeCheatFile;
     bool cheatApplyPending = false;
+#ifdef GBAS_CORE11
+    auto applyMenuCheats = [&]() {
+        std::vector<Core11::Cheat> enabled;
+        for (const auto& item : menuLayer.cheatItems())
+            if(item.type==NdsCheatItem::Type::Code && item.enabled && item.words.size()>=2 && item.words.size()%2==0)
+                enabled.push_back({item.name,item.words});
+        Core11::Cheats(enabled);
+        appendStubLog("[core11-cheats] apply enabled=%u source=%s", static_cast<unsigned>(enabled.size()),
+                      cheatLoad.sourcePath.c_str());
+        for (const auto& code : enabled)
+            appendStubLog("[core11-cheats] name=%s words=%u first=%08X %08X", code.name.c_str(),
+                          static_cast<unsigned>(code.words.size()), code.words[0], code.words[1]);
+    };
+#else
+    std::unique_ptr<ARCodeFile> runtimeCheatFile;
     auto applyMenuCheats = [&]() {
         int enabledCount = 0;
         int truncatedCount = 0;
@@ -2808,6 +2942,7 @@ int RunDekoRuntime(const DekoRunOptions& options)
                       truncatedCount,
                       cheatLoad.sourcePath.c_str());
     };
+#endif
     applyMenuCheats();
     double fps = 0.0;
     int fpsFrames = 0;
@@ -2922,7 +3057,11 @@ int RunDekoRuntime(const DekoRunOptions& options)
                           elapsedMs(thumbWriteBegin));
         }
         const auto sramFlushBegin = std::chrono::steady_clock::now();
+#ifdef GBAS_CORE11
+        Core11::FlushSave();
+#else
         NDSCart::FlushSRAMFile();
+#endif
         appendStubLog("GBAStationNDSStub: savestate sram flush slot=%d ms=%lld",
                       slot,
                       elapsedMs(sramFlushBegin));
@@ -3100,6 +3239,8 @@ int RunDekoRuntime(const DekoRunOptions& options)
         else if (menuAction == NdsMenuAction::CheatSettingsChanged)
         {
             cheatApplyPending = true;
+            if (!cheatLoad.checksumMatched)
+                menuLayer.showToast(NDS_L("游戏版本未匹配，请核对金手指目录"));
             appendStubLog("GBAStationNDSStub: cheats changed pending apply");
         }
         else if (menuAction == NdsMenuAction::NoSyncChanged)
@@ -3174,6 +3315,8 @@ int RunDekoRuntime(const DekoRunOptions& options)
             gameLayer.setCustomLayoutSettings(menuLayer.customLayoutSettings());
             inputConfig.saveValue("display.filter", "s", menuLayer.linearFiltering() ? "linear" : "nearest");
             inputConfig.saveValue("fastforward.multiplier", "f", std::to_string(menuLayer.fastForwardMultiplier()));
+            if (!inputConfig.saveValue("fastforward.normal_speed_audio", "i", menuLayer.displaySettings().normalSpeedAudio ? "1" : "0"))
+                menuLayer.showToast(NDS_L("无法保存画面设置"));
             saveNdsSettingsToGameDb(options.romPath, menuLayer.displaySettings(), false);
             appendStubLog("GBAStationNDSStub: Deko display settings filter=%s ff=%.2f 3dScale=%dx integer=%d layout=%s orientation=%d gap=%d",
                           menuLayer.linearFiltering() ? "linear" : "nearest",
@@ -3251,9 +3394,17 @@ int RunDekoRuntime(const DekoRunOptions& options)
             audio.pauseForCoreReset();
             Gfx::PresentQueue.waitIdle();
             Gfx::EmuQueue.waitIdle();
+#ifdef GBAS_CORE11
+            Core11::FlushSave();
+#else
             NDSCart::FlushSRAMFile();
+#endif
 
+#ifdef GBAS_CORE11
+            loaded = Core11::Load(coreSettings, options.romPath, savePath);
+#else
             loaded = NDS::LoadROM(options.romPath.c_str(), savePath.c_str(), directBoot);
+#endif
             appendStubLog("GBAStationNDSStub: Deko reset LoadROM loaded=%d", loaded ? 1 : 0);
             audio.resumeAfterCoreReset();
 
@@ -3320,7 +3471,7 @@ int RunDekoRuntime(const DekoRunOptions& options)
             // The requested multiplier is only a target.  Start at normal
             // pitch, then use completed emulation frames over wall-clock time
             // below to follow the speed the hardware can actually sustain.
-            audio.setFastForwardActive(fastForwardActive, 1.0f);
+            audio.setFastForwardActive(fastForwardActive, 1.0f, menuLayer.displaySettings().normalSpeedAudio);
             fastForwardAudioWindowStart = std::chrono::steady_clock::now();
             fastForwardAudioWindowFrames = 0;
             fastForwardAudioMultiplier = 1.0f;
@@ -3437,7 +3588,13 @@ int RunDekoRuntime(const DekoRunOptions& options)
                 feedMicBlow();
             else
                 feedMicSilence();
+#ifdef GBAS_CORE11
+            if(!Core11::Run()) { running=false; break; }
+            if(i+1==framesToRun) deko2d->Present();
+#else
             NDS::RunFrame();
+#endif
+            audio.captureFrameAudio();
             ++framesRan;
         }
         if (traceFrame)
@@ -3476,7 +3633,7 @@ int RunDekoRuntime(const DekoRunOptions& options)
                     fastForwardAudioMultiplier +=
                         (measuredMultiplier - fastForwardAudioMultiplier) * kMeasuredWeight;
                 }
-                audio.setFastForwardActive(true, fastForwardAudioMultiplier);
+                audio.setFastForwardActive(true, fastForwardAudioMultiplier, menuLayer.displaySettings().normalSpeedAudio);
                 fastForwardAudioWindowStart = runEnd;
                 fastForwardAudioWindowFrames = 0;
             }
@@ -3656,9 +3813,14 @@ int RunDekoRuntime(const DekoRunOptions& options)
         }
         const auto now = std::chrono::steady_clock::now();
         if (totalFrames % 600 == 0) {
+            audio.logStats();
+#ifdef GBAS_CORE11
+            Core11::LogState();
+#else
             appendStubLog("3D: target=%dx%d frames=%u native=%u",
                           deko2d->GetFramebufferWidth(), deko2d->GetFramebufferHeight(), Fulldex::DisplayFrames,
                           Fulldex::NativeFrames);
+#endif
         }
         const auto fpsElapsed = std::chrono::duration_cast<std::chrono::milliseconds>(now - fpsStart).count();
         if (fpsElapsed >= 1000)
@@ -3697,13 +3859,22 @@ int RunDekoRuntime(const DekoRunOptions& options)
     audio.setFastForwardActive(false, 1.0f);
     audio.setMuted(false);
     audio.stop();
+#ifdef GBAS_CORE11
+    Core11::FlushSave();
+#else
     AREngine::SetCodeFile(nullptr);
     runtimeCheatFile.reset();
     NDSCart::FlushSRAMFile();
+#endif
     releaseStateSlotTextures(stateSlots);
     gameLayer.deinit();
+#ifdef GBAS_CORE11
+    Core11::Stop();
+    video.reset();
+#else
     GPU::DeInitRenderer();
     NDS::DeInit();
+#endif
     Gfx::DeInit();
     romfsExit();
 

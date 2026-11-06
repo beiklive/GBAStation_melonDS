@@ -12,6 +12,11 @@
 set -Eeuo pipefail
 
 ROOT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+if [[ "${1:-}" == "--core11" ]]; then
+    shift
+    if (( $# )); then echo "Use JOBS and BUILD_DIR for the 1.1 build." >&2; exit 2; fi
+    exec bash "$ROOT_DIR/core11/build-switch.sh"
+fi
 BUILD_DIR="${BUILD_DIR:-${ROOT_DIR}/build_switch}"
 BUILD_TYPE="${BUILD_TYPE:-Release}"
 
@@ -27,6 +32,7 @@ Usage: $0 [-j JOBS] [--build-dir DIR] [--clean]
 
 Build GBAStationNDSStub.nro using the Switch toolchain from an MSYS2 shell.
 
+  --core11       Build the independent melonDS 1.1 backend (JOBS, BUILD_DIR optional).
   -j, --jobs N       Number of parallel compile jobs (default: nproc, or 4).
       --build-dir D  CMake build directory (default: build_switch).
       --clean         Clean an existing CMake build before compiling.

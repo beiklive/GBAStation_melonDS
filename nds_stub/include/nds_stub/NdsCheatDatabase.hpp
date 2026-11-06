@@ -14,6 +14,8 @@ struct NdsCheatLoadResult {
     int skippedInvalidCodes = 0;
     bool databaseFound = false;
     bool gameMatched = false;
+    bool checksumMatched = false;
+    int versionCount = 0;
 };
 
 NdsCheatLoadResult LoadUsrCheatDatForRom(const std::string& romPath);

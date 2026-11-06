@@ -1135,6 +1135,9 @@ bool NdsMenuLayer::activateDisplayControl()
 {
     switch (m_contentFocus)
     {
+    case RowNormalSpeedAudio:
+        m_display.normalSpeedAudio = !m_display.normalSpeedAudio;
+        return true;
     case RowIntegerScale:
         m_display.integerScale = !m_display.integerScale;
         return true;
@@ -1180,6 +1183,10 @@ bool NdsMenuLayer::activateCheatControl()
     }
 
     item.enabled = !item.enabled;
+    if (item.enabled && item.versionGroup >= 0)
+        for (auto& other : m_cheats)
+            if (other.versionGroup != item.versionGroup)
+                other.enabled = false;
     m_cheatSettingsDirty = true;
     return true;
 }
@@ -1404,6 +1411,9 @@ bool NdsMenuLayer::cycleCurrentSetting(int direction)
         m_display.fastForwardMultiplier = kFastForwardValues[idx];
         return true;
     }
+    case RowNormalSpeedAudio:
+        m_display.normalSpeedAudio = !m_display.normalSpeedAudio;
+        return true;
     case RowFilter:
         m_display.linearFiltering = !m_display.linearFiltering;
         return true;

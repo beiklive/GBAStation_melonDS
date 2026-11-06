@@ -14,6 +14,8 @@ bash switchbuild.sh -j 8 --build-dir build_fulldex
 c++ -std=c++17 -O2 -Isrc tests/fulldex_presentation.cpp src/fulldex/Frame.cpp src/fulldex/Presenter.cpp -o /tmp/fulldex-test && /tmp/fulldex-test
 # Apple Silicon 主机：测试 JIT 的代码范围和被改写字面量的失效，隔离操作系统页面保护。
 c++ -std=gnu++17 -O2 -DJIT_ENABLED -Isrc -Wl,-dead_strip tests/jit_invalidation.cpp -o /tmp/jit-test && /tmp/jit-test
+# Apple Silicon：以真实 Thumb 指令验证 JIT 的地址跟踪，使用 ASan 检查越界。
+c++ -std=gnu++17 -O1 -g -fsanitize=address -DJIT_ENABLED -Isrc -Wl,-dead_strip tests/jit_trace.cpp src/ARM_InstrInfo.cpp src/ARMInterpreter{,_ALU,_Branch,_LoadStore}.cpp src/xxhash/xxhash.c -o /tmp/jit-trace && /tmp/jit-trace
 ```
 
 显示测试以记录绘制命令的方式检查几何和时序；实际像素、GPU 同步和性能需在 Switch 上验证。移植来源为 Pokémon Fulldex 的 `melonDS/src/GPU3D_WideGpu*` 与 `wide_gpu/` 着色器，遵循项目 GPL-3.0-or-later 许可。

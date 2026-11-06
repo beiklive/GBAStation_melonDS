@@ -1268,6 +1268,7 @@ void drawDisplayPage(const NdsDisplaySettings& display,
     float y = kContentBodyTop - scrollY;
     auto rowPos = [&](float rowY) { return base + Vector2f{0.0f, rowY}; };
     drawLrSelectorRow(rowPos(y), NDS_L("快进倍率"), ffValue, contentFocused && focusedRow == RowFastForward, true, opacity); y += kSettingStepY;
+    drawSwitchRow(rowPos(y), NDS_L("快进声音保持原速"), display.normalSpeedAudio, contentFocused && focusedRow == RowNormalSpeedAudio, opacity); y += kSettingStepY;
     drawLrSelectorRow(rowPos(y), NDS_L("画面过滤"), filterLabel(display.linearFiltering), contentFocused && focusedRow == RowFilter, true, opacity); y += kSettingStepY;
     char renderScaleValue[16];
     std::snprintf(renderScaleValue, sizeof(renderScaleValue), "%dx", std::clamp(display.renderScale, 1, Fulldex::MaxScale()));

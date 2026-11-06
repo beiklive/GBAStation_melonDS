@@ -6,8 +6,12 @@
 #include <cstring>
 #include <utility>
 
+#ifdef GBAS_CORE11
+#include "Video.h"
+#else
 #include "GPU.h"
 #include "GPU2D_Deko.h"
+#endif
 #include "frontend/switch/Gfx.h"
 #include "nds_stub/NdsShaderCatalog.hpp"
 
@@ -899,6 +903,11 @@ void NdsGameLayer::drawScreens() const
     if (!m_renderer)
         return;
 
+#ifdef GBAS_CORE11
+    const int front=m_renderer->Front();
+#else
+    const int front=GPU::FrontBuffer;
+#endif
     const float liveSrcWidth = static_cast<float>(m_renderer->GetFramebufferWidth());
     const float liveSrcHeight = static_cast<float>(m_renderer->GetFramebufferHeight());
     const auto rects = computeScreenRects();
@@ -925,7 +934,7 @@ void NdsGameLayer::drawScreens() const
     Gfx::SetNdsSourceScale(shaderSourceScale);
     Gfx::SetShaderMode(useShader && !useMultiPassShader ? shaderModeFromType(m_shaderType) : Gfx::shaderMode_Default);
     if (m_waitForFramebufferReady)
-        Gfx::WaitForFenceReady(m_renderer->FramebufferReady[GPU::FrontBuffer]);
+        Gfx::WaitForFenceReady(m_renderer->FramebufferReady[front]);
     for (const auto& item : rects)
     {
         const int sourceScreen = item.sourceTop ? 0 : 1;
@@ -963,7 +972,7 @@ void NdsGameLayer::drawScreens() const
         }
         else
         {
-            const u32 texture = m_framebufferTextures[GPU::FrontBuffer][sourceScreen];
+            const u32 texture = m_framebufferTextures[front][sourceScreen];
             const RectF sourceRect {0.0f, 0.0f, liveSrcWidth, liveSrcHeight};
             if (useMultiPassShader)
             {
@@ -1007,7 +1016,7 @@ void NdsGameLayer::drawScreens() const
                            {1.0f, 1.0f, 1.0f, 1.0f});
     }
     Gfx::SetSampler(Gfx::sampler_Nearest | Gfx::sampler_ClampToEdge);
-    Gfx::SignalFence(m_renderer->FramebufferPresented[GPU::FrontBuffer]);
+    Gfx::SignalFence(m_renderer->FramebufferPresented[front]);
 }
 
 } // namespace beiklive::nds_stub

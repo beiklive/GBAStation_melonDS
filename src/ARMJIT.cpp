@@ -166,7 +166,11 @@ u32 LocaliseCodeAddress(u32 num, u32 addr)
         : ARMJIT_Memory::ClassifyAddress7(addr);
 
     if (CodeMemRegions[region])
-        return ARMJIT_Memory::LocaliseAddress(region, num, addr);
+    {
+        u32 local = ARMJIT_Memory::LocaliseAddress(region, num, addr);
+        if ((local >> 27) == static_cast<u32>(region) && (local & 0x7FFFFFF) < CodeRegionSizes[region])
+            return local;
+    }
     return 0;
 }
 
@@ -582,14 +586,10 @@ void CompileBlock(ARM* cpu)
     u32 blockAddr = cpu->R[15] - (thumb ? 2 : 4);
 
     u32 localAddr = LocaliseCodeAddress(cpu->Num, blockAddr);
-    if (!localAddr)
-    {
-        printf("trying to compile non executable code? %x\n", blockAddr);
-    }
 
     auto& map = cpu->Num == 0 ? JitBlocks9 : JitBlocks7;
     auto existingBlockIt = map.find(blockAddr);
-    if (existingBlockIt != map.end())
+    if (localAddr && existingBlockIt != map.end())
     {
         // there's already a block, though it's not inside the fast map
         // could be that there are two blocks at the same physical addr
@@ -615,9 +615,10 @@ void CompileBlock(ARM* cpu)
     int i = 0;
     u32 r15 = cpu->R[15];
 
-    u32 addressRanges[Config::JIT_MaxBlockSize];
-    u32 addressMasks[Config::JIT_MaxBlockSize];
-    memset(addressMasks, 0, Config::JIT_MaxBlockSize * sizeof(u32));
+    // One instruction may cover two distinct ranges: its code and its literal.
+    u32 addressRanges[2 * Config::JIT_MaxBlockSize];
+    u32 addressMasks[2 * Config::JIT_MaxBlockSize];
+    memset(addressMasks, 0, sizeof(addressMasks));
     u32 numAddressRanges = 0;
 
     u32 numLiterals = 0;
@@ -659,25 +660,27 @@ void CompileBlock(ARM* cpu)
         instrValues[numInstrs++] = instrs[i].Instr;
 
         u32 translatedAddr = LocaliseCodeAddress(cpu->Num, instrs[i].Addr);
-        assert(translatedAddr >> 27);
-        u32 translatedAddrRounded = translatedAddr & ~0x1FF;
-        if (i == 0 || translatedAddrRounded != addressRanges[numAddressRanges - 1])
+        if (translatedAddr)
         {
-            bool returning = false;
-            for (u32 j = 0; j < numAddressRanges; j++)
+            u32 translatedAddrRounded = translatedAddr & ~0x1FF;
+            if (i == 0 || translatedAddrRounded != addressRanges[numAddressRanges - 1])
             {
-                if (addressRanges[j] == translatedAddrRounded)
+                bool returning = false;
+                for (u32 j = 0; j < numAddressRanges; j++)
                 {
-                    std::swap(addressRanges[j], addressRanges[numAddressRanges - 1]);
-                    std::swap(addressMasks[j], addressMasks[numAddressRanges - 1]);
-                    returning = true;
-                    break;
+                    if (addressRanges[j] == translatedAddrRounded)
+                    {
+                        std::swap(addressRanges[j], addressRanges[numAddressRanges - 1]);
+                        std::swap(addressMasks[j], addressMasks[numAddressRanges - 1]);
+                        returning = true;
+                        break;
+                    }
                 }
+                if (!returning)
+                    addressRanges[numAddressRanges++] = translatedAddrRounded;
             }
-            if (!returning)
-                addressRanges[numAddressRanges++] = translatedAddrRounded;
+            addressMasks[numAddressRanges - 1] |= 1 << ((translatedAddr & 0x1FF) / 16);
         }
-        addressMasks[numAddressRanges - 1] |= 1 << ((translatedAddr & 0x1FF) / 16);
 
         if (cpu->Num == 0)
         {
@@ -741,6 +744,11 @@ void CompileBlock(ARM* cpu)
                     cpu->AddCycles_C();
             }
         }
+
+        // Tracing has already executed this instruction. If the address cannot be
+        // tracked, resume at the resulting guest PC without publishing this trace.
+        if (!translatedAddr)
+            return;
 
         instrs[i].DataCycles = cpu->DataCycles;
         instrs[i].DataRegion = cpu->DataRegion;
@@ -813,13 +821,14 @@ void CompileBlock(ARM* cpu)
                 {
                     // we might have an idle loop
                     u32 backwardsOffset = (instrs[i].Addr - target) / (thumb ? 2 : 4);
-                    if (IsIdleLoop(thumb, &instrs[i - backwardsOffset], backwardsOffset + 1))
+                    if (backwardsOffset <= static_cast<u32>(i) && instrs[i - backwardsOffset].Addr == target &&
+                        IsIdleLoop(thumb, &instrs[i - backwardsOffset], backwardsOffset + 1))
                     {
                         instrs[i].BranchFlags |= branch_IdleBranch;
                         JIT_DEBUGPRINT("found %s idle loop %d in block %08x\n", thumb ? "thumb" : "arm", cpu->Num, blockAddr);
                     }
                 }
-                else if (hasBranched && !isBackJump && i + 1 < Config::JIT_MaxBlockSize)
+                else if (hasBranched && !isBackJump && numInstrs < Config::JIT_MaxBlockSize)
                 {
                     if (link)
                     {
@@ -847,7 +856,7 @@ void CompileBlock(ARM* cpu)
                 }
             }
 
-            if (!hasBranched && cond < 0xE && i + 1 < Config::JIT_MaxBlockSize)
+            if (!hasBranched && cond < 0xE && numInstrs < Config::JIT_MaxBlockSize)
             {
                 instrs[i].Info.EndBlock = false;
                 instrs[i].BranchFlags |= branch_FollowCondNotTaken;
@@ -860,7 +869,7 @@ void CompileBlock(ARM* cpu)
         bool secondaryFlagReadCond = !canCompile || (instrs[i - 1].BranchFlags & (branch_FollowCondTaken | branch_FollowCondNotTaken));
         if (instrs[i - 1].Info.ReadFlags != 0 || secondaryFlagReadCond)
             FloodFillSetFlags(instrs, i - 2, !secondaryFlagReadCond ? instrs[i - 1].Info.ReadFlags : 0xF);
-    } while(!instrs[i - 1].Info.EndBlock && i < Config::JIT_MaxBlockSize && !cpu->Halted && (!cpu->IRQ || (cpu->CPSR & 0x80)));
+    } while(!instrs[i - 1].Info.EndBlock && numInstrs < Config::JIT_MaxBlockSize && !cpu->Halted && (!cpu->IRQ || (cpu->CPSR & 0x80)));
 
     // A write in the block may change a literal before a later load. This
     // block must compile those accesses as loads, including its first run.
