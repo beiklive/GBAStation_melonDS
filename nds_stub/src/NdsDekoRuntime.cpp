@@ -44,7 +44,6 @@
 
 #ifdef GBAS_CORE11
 #include "FrontendAPI.h"
-#include "SaveSeed.h"
 #define SAVESTATE_MAJOR 13
 #define SAVESTATE_MINOR 0
 #else
@@ -2620,37 +2619,8 @@ int RunDekoRuntime(const DekoRunOptions& options)
         return 1;
     }
 
-    std::string savePath = resolveSavePath(options);
-#ifdef GBAS_CORE11
-    // Seed this core from the battery save once. Do not write v13 states or
-    // new cartridge progress into the legacy core's directory.
-    const auto oldSave=std::filesystem::path(savePath);
-    auto modernDir=oldSave.parent_path()/"core11";
-    std::error_code copyError;
-    std::filesystem::create_directories(modernDir,copyError);
-    if(copyError) {
-        appendStubLog("Core11: mkdir failed path=%s: %s",modernDir.c_str(),copyError.message().c_str());
-        return 1;
-    }
-    auto newSave=modernDir/oldSave.filename();
-    appendStubLog("GBAStation NDS 1.1: battery source=%s target=%s", oldSave.c_str(), newSave.c_str());
-    std::string seedError;
-    const auto seeded=Core11::SeedBatterySave(oldSave,newSave,seedError);
-    if(seeded==Core11::SeedResult::Error) {
-        appendStubLog("Cannot initialize battery save: %s",seedError.c_str());
-        return 1;
-    }
-    if(seeded==Core11::SeedResult::Copied)
-        appendStubLog("Core11: initialized private battery save from %s",oldSave.c_str());
-    if(seeded==Core11::SeedResult::Missing)
-        appendStubLog("Core11: no battery save found; starting from the title screen");
-    savePath=newSave.string();
-#endif
-    std::string stateDir = resolveStateDir(options, inputConfig);
-#ifdef GBAS_CORE11
-    stateDir=joinPath(stateDir,"core11");
-    {std::error_code ec; std::filesystem::create_directories(stateDir,ec); if(ec) return 1;}
-#endif
+    const std::string savePath = resolveSavePath(options);
+    const std::string stateDir = resolveStateDir(options, inputConfig);
 
     padConfigureInput(1, HidNpadStyleSet_NpadStandard);
     hidInitializeTouchScreen();

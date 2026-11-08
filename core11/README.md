@@ -6,9 +6,7 @@
 
 将 `GBAStationNDS11.nro` 放到 SD 卡的 `/switch/GBAStationNDS11/`，以应用模式进入 hbmenu。无启动参数时使用日志里的 `/roms/nds/black.nds`；GBAStation 传入 ROM 和 `--return` 时仍按启动参数运行。BIOS、固件和按键使用 GBAStation 已有配置。默认遵循现有 JIT 设置，启动时按住 ZL 可仅对这次运行强制使用解释器。
 
-首次运行会尝试复制 GameDB 指定目录中的同名 `.sav`，之后在该目录的 `core11/` 内保存。即时存档也写入状态目录的 `core11/`，与 v8 槽位分开。要接着已有进度玩，应从游戏标题画面读卡带存档。如果只有旧即时存档，先在原核心用转场前的槽位进入游戏并用游戏菜单保存。已经初始化过新版进度的情况下，请先备份新版的 `.sav`，不要覆盖它。运行日志在 `/GBAStation/log/NdsCore11.log`，会记录执行模式、ARM9/ARM7 PC、亮度和两屏图像校验值。
-
-存档初始化使用分块读写，避免 Switch 的 `copy_file` 权限与 inode 兼容问题。旧版失败留下的 `.seed` 会在重试时重写，已有 `.sav` 或 `.bak` 不会被初始化覆盖。复制失败日志会标明具体步骤和路径。Mac 回归检查：`c++ -std=c++17 -Wall -Wextra -fsanitize=address,undefined tests/core11_save_seed.cpp -o /tmp/core11_save_seed && /tmp/core11_save_seed`。
+电池存档恢复直接读写 GameDB 指定目录中的同名 `.sav`，未指定时使用原默认目录，不再追加 `core11/` 或初始化私有副本。此前在 `core11/` 内产生的新进度，如需继续使用，应先备份原目录的同名 `.sav`，再将新版 `.sav` 复制回原目录。即时存档恢复使用原状态目录（优先 GameDB 指定目录，其次 `save.stateDir`，最后默认状态目录），读写、槽位扫描及 `.ssN.png` 缩略图使用同一路径，不再追加 `core11/`。格式仍为 v13，不兼容旧 v8；此前生成在 `core11/` 内的 v13 即时存档需连同缩略图移回原目录才能被扫描，移动前注意同名槽位。要接着已有进度玩，应从游戏标题画面读卡带存档。如果只有旧即时存档，先在原核心用转场前的槽位进入游戏并用游戏菜单保存。已经初始化过新版进度的情况下，请先备份新版的 `.sav`，不要覆盖它。运行日志在 `/GBAStation/log/NdsCore11.log`，会记录执行模式、ARM9/ARM7 PC、亮度和两屏图像校验值。
 
 Switch 的原生分辨率 3D 和高分辨率 3D 均固定使用供体的 deko3D 路径，包括 1 倍时的原生画面。模拟主线程运行在 CPU 0，GPU 提交和取回线程使用供体的 CPU 1/2 调度。原生 GPU 输出仍通过 DS 的 2D 合成、亮度和屏幕捕获流程；读写即时存档、切换倍率和退出前会等待原生与高分辨率 GPU 工作完成。Mac 回放使用多线程软件绘制。
 
